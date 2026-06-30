@@ -1,0 +1,53 @@
+# Сессионные файлы Telegram (содержат auth-данные)
+*.session
+*.session.session
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# PyInstaller сборка
+build/
+dist/
+*.spec
+
+# Кэши Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Системные файлы
+Thumbs.db
+.DS_Store
+
+# Временные файлы загрузок
+*.temp.mp3
+*.temp.ogg
+*.temp.wav
+*.wav
+
+# Директория загрузок (содержит результат)
+telegram_audio/
+
+# Логи
+*.log
+logs/
+
+# Покрытие кода
+htmlcov/
+.coverage
+
+# Pytest
+.pytest_cache/
+
+# Временные скрипты
+_test_*.py
+_test_*.*

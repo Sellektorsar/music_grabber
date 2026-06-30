@@ -1,0 +1,12 @@
+PyQt6==6.9.1
+Telethon==1.41.2
+pydub==0.25.1
+sounddevice==0.5.2
+scipy==1.16.2
+numpy==2.3.3
+
+# Тестовые зависимости (pip install -r requirements-dev.txt)
+# pytest
+# pytest-cov
+# pytest-asyncio
+# pytest-qt
