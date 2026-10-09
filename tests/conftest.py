@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, PropertyMock
 _telethon_mock = MagicMock()
 sys.modules['telethon'] = _telethon_mock
 
+sys.modules['sounddevice'] = MagicMock()
+
 
 def _make_async_client(*args, **kwargs):
     client = AsyncMock()
@@ -64,6 +66,8 @@ def _get_doc_attr(duration=30, performer='TestArtist', title='TestTitle'):
 @pytest.fixture(autouse=True)
 def isolate_base_folder(monkeypatch, tmp_path):
     monkeypatch.setattr(rec_module, 'BASE_FOLDER', str(tmp_path / "telegram_audio"))
+    monkeypatch.setattr(cfg_module, 'DB_FILE', str(tmp_path / "telegram_audio" / "downloads.db"))
+    monkeypatch.setattr(cfg_module, 'CONFIG_FILE', str(tmp_path / "telegram_audio" / "config.json"))
     return tmp_path
 
 

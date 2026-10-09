@@ -1,6 +1,14 @@
 # Сессионные файлы Telegram (содержат auth-данные)
 *.session
 *.session.session
+*.session-journal
+
+# Секреты и пользовательские конфиги
+.env
+.env.*
+*.env
+config.json
+secrets.json
 
 # Виртуальное окружение
 .venv/
@@ -11,6 +19,7 @@ env/
 build/
 dist/
 *.spec
+!TelegramAudioDownloader.spec
 
 # Кэши Python
 __pycache__/
@@ -37,9 +46,10 @@ Thumbs.db
 # Директория загрузок (содержит результат)
 telegram_audio/
 
-# Логи
+# Логи и журналы падений
 *.log
 logs/
+crash.log
 
 # Покрытие кода
 htmlcov/
@@ -48,6 +58,18 @@ htmlcov/
 # Pytest
 .pytest_cache/
 
-# Временные скрипты
+# Временные скрипты и прототипы разработки
 _test_*.py
 _test_*.*
+prototype_*.py
+scratch_*.py
+render_*.py
+inspect_ui.py
+
+# Локальные базы данных, снимки UI и QA-артефакты
+*.db
+*.sqlite
+*.sqlite3
+ui_inspection_shots/
+night_qa/
+*.png

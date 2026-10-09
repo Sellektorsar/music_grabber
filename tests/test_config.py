@@ -97,9 +97,17 @@ class TestDefaults:
             'download_delay', 'mp3_bitrate', 'sample_rate',
             'proxy_enabled', 'proxy_type', 'proxy_host', 'proxy_port',
             'proxy_username', 'proxy_password',
+            'export_pattern', 'auto_generate_m3u8', 'playlist_filename',
+            'minimize_to_tray', 'tray_notifications',
+            'auto_watcher_enabled', 'auto_watcher_interval_minutes',
         }
         assert set(cfg.DEFAULT_CONFIG.keys()) == required
         assert cfg.DEFAULT_CONFIG['mode'] == 'direct'
         assert cfg.DEFAULT_CONFIG['max_concurrent_downloads'] == 5
         assert cfg.DEFAULT_CONFIG['max_download_retries'] == 3
         assert cfg.DEFAULT_CONFIG['mp3_bitrate'] == '192k'
+        assert cfg.DEFAULT_CONFIG['auto_generate_m3u8'] is True
+        assert cfg.DEFAULT_CONFIG['minimize_to_tray'] is False
+        assert cfg.DEFAULT_CONFIG['tray_notifications'] is True
+        assert cfg.DEFAULT_CONFIG['auto_watcher_enabled'] is False
+        assert cfg.DEFAULT_CONFIG['auto_watcher_interval_minutes'] == 15

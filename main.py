@@ -28,11 +28,33 @@ def setup_logging():
 
 def main():
     setup_logging()
+
+    # Глобальный перехватчик необработанных исключений — запись в файл
+    import traceback
+
+    def excepthook(exc_type, exc_value, exc_tb):
+        with open("crash.log", "a", encoding="utf-8") as f:
+            f.write(f"UNHANDLED EXCEPTION: {exc_type.__name__}: {exc_value}\n")
+            f.write("".join(traceback.format_tb(exc_tb)))
+            f.write("\n")
+        # Вызов оригинального обработчика
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = excepthook
+
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(700, 500)
+    window.resize(1280, 750)
     window.show()
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    except Exception as e:
+        with open("crash.log", "a", encoding="utf-8") as f:
+            f.write(f"EXCEPTION in app.exec(): {e}\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

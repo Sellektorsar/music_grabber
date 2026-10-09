@@ -3,6 +3,7 @@ import os
 
 CONFIG_DIR = "telegram_audio"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+DB_FILE = os.path.join(CONFIG_DIR, "downloads.db")
 
 DEFAULT_CONFIG = {
     "api_id": "",
@@ -23,6 +24,13 @@ DEFAULT_CONFIG = {
     "proxy_port": 10808,
     "proxy_username": "",
     "proxy_password": "",
+    "export_pattern": "{date}/{artist} - {title}.mp3",
+    "auto_generate_m3u8": True,
+    "playlist_filename": "{channel}_{date}.m3u8",
+    "minimize_to_tray": False,
+    "tray_notifications": True,
+    "auto_watcher_enabled": False,
+    "auto_watcher_interval_minutes": 15,
 }
 
 

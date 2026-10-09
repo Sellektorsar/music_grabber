@@ -1,381 +1,445 @@
+"""Модуль GUI Telegram Audio Downloader в стиле BEATSTORM DJ Pool Workstation.
+
+Содержит:
+- Трехколоночную компоновку рабочего стола диджея (Channels, Library, Download Monitor);
+- Верхнюю панель навигации (BEATSTORM, вкладки, поиск, профиль);
+- Мульти-колоночную библиотеку треков с вейвформами и статусами;
+- Панель мониторинга загрузок с графиком скорости и активными потоками;
+- Встроенный аудиоплеер для предпрослушивания;
+- Полную обратную совместимость со всеми существующими сигналами и тестами.
+"""
+
+import os
+import sys
+import logging
+
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QLineEdit, QPushButton, QTextEdit,
-    QComboBox, QVBoxLayout, QHBoxLayout, QMessageBox, QDialog, QDialogButtonBox,
-    QCheckBox, QGroupBox, QFormLayout
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QStackedWidget,
+    QSystemTrayIcon,
 )
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, QTimer
+
 from downloader import DownloadThread
 from config import load_config, save_config
-import shutil
-import logging
+import database as db_module
+from ui.tray import setup_system_tray, show_tray_notification
 
 logger = logging.getLogger(__name__)
 
+# Хранилище ссылок на фоновые потоки, еще не успевшие завершиться при закрытии окна,
+# для предотвращения краша 'QThread: Destroyed while thread is still running'
+_LINGERING_THREADS: set = set()
 
-def is_ffmpeg_available() -> bool:
-    """Проверяет доступность ffmpeg в PATH. Нужен для конвертации в MP3 (pydub)."""
-    return shutil.which("ffmpeg") is not None
+# Re-exports for 100% backward compatibility
+from ui.theme import DARK_STYLESHEET
+from ui.dialogs import (
+    InputCodeDialog,
+    QRCodeDialog,
+    ProxySettingsDialog,
+    is_ffmpeg_available,
+)
+from ui.widgets import (
+    SpeedMeterWidget,
+    create_beatstorm_logo_pixmap,
+    create_user_avatar_pixmap,
+    create_waveform_pixmap,
+    create_waveform_placeholder,
+    get_cached_waveform_placeholder,
+    extract_bpm_meta,
+    _PLACEHOLDER_CACHE,
+)
+from ui.player import AudioPlayerBar
+from ui.navbar import setup_deck_header
+from ui.sidebar import setup_api_drawer, setup_channels_sidebar
+from ui.monitor import setup_download_monitor
+from ui.library import setup_library_panel
 
-class InputCodeDialog(QDialog):
-    code_entered = pyqtSignal(str)
-
-    def __init__(self, prompt, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Ввод данных")
-        self.setModal(True)
-        self.resize(400, 120)
-
-        self.label = QLabel(prompt)
-        self.label.setStyleSheet("font-weight: bold; font-size: 14px; color: darkblue;")
-        self.input = QLineEdit()
-        self.input.setEchoMode(QLineEdit.EchoMode.Normal)
-        self.input.setPlaceholderText("Введите значение...")
-
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.label)
-        layout.addWidget(self.input)
-        layout.addWidget(self.buttons)
-        self.setLayout(layout)
-
-        self.buttons.accepted.connect(self.on_accept)
-        self.buttons.rejected.connect(self.reject)
-
-        logger.info(f"Открыто окно ввода: {prompt}")
-
-    def on_accept(self):
-        text = self.input.text().strip()
-        if not text:
-            QMessageBox.warning(self, "Ошибка", "Пожалуйста, введите значение.")
-            logger.warning("Пустой ввод в окне ввода, запрос повторяется")
-            return
-        logger.info(f"Введено: {text}")
-        self.code_entered.emit(text)
-        self.accept()
+from ui.controllers.channels_controller import (
+    ChannelsMixin,
+    DEFAULT_CHANNELS,
+    load_saved_channels,
+    save_saved_channels,
+)
+from ui.controllers.tree_controller import TreeControllerMixin
+from ui.controllers.download_controller import DownloadControllerMixin
 
 
-class ProxySettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Настройки прокси")
-        self.setModal(True)
-        self.resize(400, 300)
+class MainWindow(
+    QWidget,
+    ChannelsMixin,
+    TreeControllerMixin,
+    DownloadControllerMixin,
+):
+    """Главное окно приложения TelegramAudioDownloader (BEATSTORM DJ Pool Workstation)."""
 
-        self.enabled_cb = QCheckBox("Использовать прокси")
-
-        self.type_label = QLabel("Тип прокси:")
-        self.type_combo = QComboBox()
-        self.type_combo.addItem("SOCKS5", "socks5")
-        self.type_combo.addItem("HTTP", "http")
-        self.type_combo.addItem("MTProto", "mtproto")
-        self.type_combo.currentIndexChanged.connect(self._on_type_changed)
-
-        self.host_label = QLabel("Хост:")
-        self.host_input = QLineEdit()
-        self.host_input.setPlaceholderText("127.0.0.1")
-
-        self.port_label = QLabel("Порт:")
-        self.port_input = QLineEdit()
-        self.port_input.setPlaceholderText("10808")
-
-        self.username_label = QLabel("Логин (опционально):")
-        self.username_input = QLineEdit()
-
-        self.password_label = QLabel("Пароль (опционально):")
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-
-        self._on_type_changed()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        form = QFormLayout()
-        form.addRow(self.enabled_cb)
-        form.addRow(self.type_label, self.type_combo)
-        form.addRow(self.host_label, self.host_input)
-        form.addRow(self.port_label, self.port_input)
-        form.addRow(self.username_label, self.username_input)
-        form.addRow(self.password_label, self.password_input)
-
-        layout = QVBoxLayout()
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-
-    def _on_type_changed(self):
-        is_mtproto = self.type_combo.currentData() == "mtproto"
-        self.username_label.setVisible(not is_mtproto)
-        self.username_input.setVisible(not is_mtproto)
-        self.password_label.setText("Secret" if is_mtproto else "Пароль (опционально):")
-        self.password_input.setPlaceholderText("MTProto secret" if is_mtproto else "")
-        self.host_label.setText("Хост:" if not is_mtproto else "Хост/URL:")
-
-    def set_proxy_config(self, cfg):
-        self.enabled_cb.setChecked(cfg.get("enabled", False))
-        idx = self.type_combo.findData(cfg.get("type", "socks5"))
-        if idx >= 0:
-            self.type_combo.setCurrentIndex(idx)
-        self.host_input.setText(cfg.get("host", ""))
-        self.port_input.setText(str(cfg.get("port", "")))
-        self.username_input.setText(cfg.get("username", ""))
-        self.password_input.setText(cfg.get("password", ""))
-
-    def get_proxy_config(self):
-        return {
-            "enabled": self.enabled_cb.isChecked(),
-            "type": self.type_combo.currentData(),
-            "host": self.host_input.text().strip(),
-            "port": self.port_input.text().strip(),
-            "username": self.username_input.text().strip(),
-            "password": self.password_input.text().strip(),
-        }
-
-
-class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Telegram Audio Downloader")
+        self.setStyleSheet(DARK_STYLESHEET)
+        self.resize(1280, 750)
+        self.setMinimumSize(1020, 680)
 
-        self.api_id_label = QLabel("API ID:")
-        self.api_id_input = QLineEdit()
-        self.api_id_input.setToolTip("ID приложения из my.telegram.org/apps")
+        # -------------------------------------------------------------
+        # 0. BEATSTORM Верхний навбар (Master Deck Header)
+        setup_deck_header(self)
 
-        self.api_hash_label = QLabel("API Hash:")
-        self.api_hash_input = QLineEdit()
-        # api_hash — полу-секретные данные, маскируем как пароль
-        self.api_hash_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_hash_input.setToolTip("Hash приложения из my.telegram.org/apps")
+        # 1. API & Proxy Settings Drawer (Collapsible)
+        setup_api_drawer(self)
 
-        self.channel_label = QLabel("Канал (@channelname):")
-        self.channel_input = QLineEdit()
-        self.channel_input.setToolTip("Username канала или ссылка вида @channelname")
+        # 2. Левая колонка: TELEGRAM CHANNELS
+        setup_channels_sidebar(self)
 
-        self.mode_label = QLabel("Режим:")
-        self.mode_combo = QComboBox()
-        # Подписи на русском для пользователя; техническое значение хранится в UserRole
-        # и используется как контракт с recorder.process_message.
-        self.mode_combo.addItem("Прямое скачивание", "direct")
-        self.mode_combo.addItem("Запись звука", "record")
-        self.mode_combo.addItem("Гибрид (прямое, затем запись)", "hybrid")
-        self.mode_combo.setToolTip(
-            "Прямое скачивание — получает файл с сервера Telegram.\n"
-            "Запись звука — записывает аудио через звуковое устройство.\n"
-            "Гибрид — сначала пробует прямое скачивание, при неудаче — запись."
-        )
+        # 3. Центральная колонка: MUSIC LIBRARY
+        setup_library_panel(self)
 
-        self.date_from_label = QLabel("Дата с (YYYY-MM-DD):")
-        self.date_from_input = QLineEdit()
-        self.date_from_input.setToolTip("Начальная дата (включительно). Пример: 2025-01-01")
+        # 4. Правая колонка: DOWNLOAD MONITOR
+        setup_download_monitor(self)
 
-        self.date_to_label = QLabel("Дата по (YYYY-MM-DD):")
-        self.date_to_input = QLineEdit()
-        self.date_to_input.setToolTip("Конечная дата (включительно). Пример: 2025-12-31")
+        # 6. Нижний Preview-плеер (Master Deck Audio Player)
+        # -------------------------------------------------------------
+        self.player_bar = AudioPlayerBar(parent=self, log_callback=self.log)
+        self.btn_play_pause = self.player_bar.btn_play_pause
+        self.btn_player_stop = self.player_bar.btn_player_stop
+        self.player_title_label = self.player_bar.player_title_label
+        self.player_slider = self.player_bar.player_slider
+        self.player_time_label = self.player_bar.player_time_label
+        self.volume_slider = self.player_bar.volume_slider
+        self._player = self.player_bar._player
+        self._audio_output = self.player_bar._audio_output
 
-        self.start_button = QPushButton("Запустить скачивание")
-        self.stop_button = QPushButton("Остановить")
-        self.stop_button.setEnabled(False)
+        # -------------------------------------------------------------
+        # 7. Сборка всей 3-колоночной композиции
+        # -------------------------------------------------------------
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Прогресс-панель
-        self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("font-size: 12px; color: #333; padding: 4px;")
-        self.progress_label.setWordWrap(True)
+        root_layout.addWidget(self.deck_header)
+        root_layout.addWidget(self.api_group)
 
-        self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True)
+        # 3 колонки по горизонтали (Рабочий стол DJ Library)
+        self.body_widget = QWidget()
+        body_layout = QHBoxLayout(self.body_widget)
+        body_layout.setContentsMargins(10, 8, 10, 8)
+        body_layout.setSpacing(10)
 
-        layout = QVBoxLayout()
-        form_layout = QVBoxLayout()
+        body_layout.addWidget(self.left_panel)
+        body_layout.addWidget(self.center_panel, 1)
+        body_layout.addWidget(self.right_panel)
 
-        for label, widget in [
-            (self.api_id_label, self.api_id_input),
-            (self.api_hash_label, self.api_hash_input),
-            (self.channel_label, self.channel_input),
-            (self.mode_label, self.mode_combo),
-            (self.date_from_label, self.date_from_input),
-            (self.date_to_label, self.date_to_input),
-        ]:
-            hl = QHBoxLayout()
-            hl.addWidget(label)
-            hl.addWidget(widget)
-            form_layout.addLayout(hl)
+        # Стек для вкладок Home / Channels / Library
+        self.main_stack = QStackedWidget()
+        self.home_view = self._create_home_view()
+        self.main_stack.addWidget(self.home_view)    # Index 0: Bento Grid Studio (Default Active Workstation)
+        self.main_stack.addWidget(self.body_widget)  # Index 1: Classic Library
+        self.channels_view = self._create_channels_view()
+        self.main_stack.addWidget(self.channels_view)  # Index 2: Channels
 
-        layout.addLayout(form_layout)
+        root_layout.addWidget(self.main_stack, 1)
 
-        proxy_layout = QHBoxLayout()
-        self.proxy_button = QPushButton("Настройки прокси...")
-        proxy_layout.addWidget(self.proxy_button)
-        layout.addLayout(proxy_layout)
+        # Прогресс-бар перед плеером
+        progress_container = QWidget()
+        prog_layout = QVBoxLayout(progress_container)
+        prog_layout.setContentsMargins(12, 0, 12, 2)
+        prog_layout.addWidget(self.progress_bar)
+        prog_layout.addWidget(self.progress_label)
+        root_layout.addWidget(progress_container)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(self.start_button)
-        btn_layout.addWidget(self.stop_button)
-        layout.addLayout(btn_layout)
+        # Нижний плеер
+        root_layout.addWidget(self.player_bar)
 
-        layout.addWidget(self.progress_label)
+        self.setLayout(root_layout)
 
-        layout.addWidget(self.log_output)
-
-        self.setLayout(layout)
-
-        self.start_button.clicked.connect(self.start_download)
+        # Сигналы кнопок
+        self.scan_button.clicked.connect(self.start_scan)
+        self.download_button.clicked.connect(self.start_download)
         self.stop_button.clicked.connect(self.stop_download)
         self.proxy_button.clicked.connect(self.open_proxy_settings)
 
         self._load_settings()
+        if hasattr(self, "bento_channel_input") and hasattr(self, "channel_input"):
+            self.bento_channel_input.setText(self.channel_input.text())
+        self.switch_tab("home")
+
+        self._api_settings_open = not bool(self.api_id_input.text().strip())
+        self.api_group.setVisible(self._api_settings_open)
+        self._log_open = False
+        self.log_output.setVisible(False)
 
         self.download_thread = None
         self.input_dialog = None
-        # Флаг «ответ диалога ввода уже отправлен worker-у» — защита от двойной
-        # отправки (баг, когда on_dialog_closed затирал правильный ответ пустой строкой).
+        self.qr_dialog = None
         self._input_answered = False
-        self._proxy_config = {}
+        self._scan_results = []
+        self._updating_table = False
+        self._updating_tree = False
+        self._channel_offsets = {}
+        self._no_more_tracks = False
+        self._current_scan_channels = []
+        self._track_status_badges = {}
+        self._track_waveforms = {}
+        self._track_item_by_id = {}
+        self._track_row_by_id = {}
+        self._track_by_id = {}
+        self._track_list_item_by_id = {}
 
-    def _load_settings(self):
+        self._current_audio_path = None
+        self._is_seeking = False
+
+        # Инициализация фонового наблюдателя каналов и системного трея
+        self._force_close = False
+        self._tray_minimized_notified = False
+        self._init_background_watcher()
+        setup_system_tray(self)
+
+        # Автоматическое сканирование сохраненных каналов при запуске приложения (по умолчанию выключено)
         cfg = load_config()
-        if cfg.get("api_id"):
-            self.api_id_input.setText(cfg["api_id"])
-        if cfg.get("api_hash"):
-            self.api_hash_input.setText(cfg["api_hash"])
-        if cfg.get("channel"):
-            self.channel_input.setText(cfg["channel"])
-        mode = cfg.get("mode", "direct")
-        idx = self.mode_combo.findData(mode)
-        if idx >= 0:
-            self.mode_combo.setCurrentIndex(idx)
-        if cfg.get("date_from"):
-            self.date_from_input.setText(cfg["date_from"])
-        if cfg.get("date_to"):
-            self.date_to_input.setText(cfg["date_to"])
-        self._proxy_config = {
-            "enabled": cfg.get("proxy_enabled", False),
-            "type": cfg.get("proxy_type", "socks5"),
-            "host": cfg.get("proxy_host", ""),
-            "port": cfg.get("proxy_port", ""),
-            "username": cfg.get("proxy_username", ""),
-            "password": cfg.get("proxy_password", ""),
-        }
+        if cfg.get("auto_scan_on_startup", False) and not os.environ.get("PYTEST_CURRENT_TEST"):
+            QTimer.singleShot(700, self._auto_start_scan)
 
-    def log(self, message):
-        self.log_output.append(message)
-        self.log_output.verticalScrollBar().setValue(self.log_output.verticalScrollBar().maximum())
-        logger.debug(f"GUI log: {message}")
+    def log(self, text):
+        logger.info(text)
+        self.log_output.append(text)
 
-    def open_proxy_settings(self):
-        dialog = ProxySettingsDialog(self)
-        dialog.set_proxy_config(self._proxy_config)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._proxy_config = dialog.get_proxy_config()
-            save_config(
-                proxy_enabled=self._proxy_config["enabled"],
-                proxy_type=self._proxy_config["type"],
-                proxy_host=self._proxy_config["host"],
-                proxy_port=self._proxy_config["port"],
-                proxy_username=self._proxy_config["username"],
-                proxy_password=self._proxy_config["password"],
+    def _init_background_watcher(self):
+        """Инициализирует таймер фонового мониторинга каналов."""
+        self._watcher_timer = QTimer(self)
+        self._watcher_timer.timeout.connect(self._on_watcher_tick)
+        cfg = load_config()
+        self._watcher_enabled = bool(cfg.get("auto_watcher_enabled", False))
+        interval_min = int(cfg.get("auto_watcher_interval_minutes", 15))
+        if self._watcher_enabled and not os.environ.get("PYTEST_CURRENT_TEST"):
+            self._watcher_timer.start(interval_min * 60 * 1000)
+
+    def toggle_background_watcher(self, enabled=None):
+        """Включает или выключает фоновый мониторинг каналов."""
+        if enabled is None:
+            self._watcher_enabled = not getattr(self, "_watcher_enabled", False)
+        else:
+            self._watcher_enabled = bool(enabled)
+
+        cfg = load_config()
+        interval_min = int(cfg.get("auto_watcher_interval_minutes", 15))
+        save_config(auto_watcher_enabled=self._watcher_enabled)
+
+        if self._watcher_enabled:
+            self._watcher_timer.start(interval_min * 60 * 1000)
+            self.log(f"🔔 Фоновый мониторинг каналов включен (интервал: {interval_min} мин).")
+            self.show_tray_notification(
+                "BEATSTORM Watcher",
+                f"Фоновый мониторинг каналов включен ({interval_min} мин).",
             )
-            status = "включён" if self._proxy_config["enabled"] else "выключен"
-            self.log(f"Прокси {status}")
+            if hasattr(self, "btn_notif"):
+                self.btn_notif.setStyleSheet("QPushButton#chipButton { color: #00E676; border-color: #1A5432; }")
+        else:
+            self._watcher_timer.stop()
+            self.log("🔕 Фоновый мониторинг каналов выключен.")
+            self.show_tray_notification("BEATSTORM Watcher", "Фоновый мониторинг отключен.")
+            if hasattr(self, "btn_notif"):
+                self.btn_notif.setStyleSheet("")
 
-    def update_progress(self, data):
-        scanned = data.get("total_scanned", 0)
-        audio = data.get("audio_found", 0)
-        downloaded = data.get("downloaded", 0)
-        skipped = data.get("skipped", 0)
-        exists = data.get("already_exists", 0)
-        eta_sec = data.get("eta_seconds", 0)
-        eta_str = f"{int(eta_sec // 60)} мин {int(eta_sec % 60)} сек" if eta_sec > 0 else "—"
-        parts = [
-            f"Просмотрено: {scanned}",
-            f"Аудио: {audio}",
-            f"Загружено: {downloaded}",
-            f"Пропущено: {skipped}",
-            f"Уже есть: {exists}",
-            f"ETA: {eta_str}",
-        ]
-        current = data.get("current_file", "")
-        if current:
-            parts.append(f"Файл: {current}")
-        self.progress_label.setText(" | ".join(parts))
-        logger.debug(f"Progress: {data}")
+        if hasattr(self, "action_tray_watcher") and self.action_tray_watcher:
+            self.action_tray_watcher.blockSignals(True)
+            self.action_tray_watcher.setChecked(self._watcher_enabled)
+            self.action_tray_watcher.blockSignals(False)
 
-    def start_download(self):
+    def check_channel_updates_now(self):
+        """Ручной запуск быстрой проверки обновлений каналов."""
+        if self.download_thread and self.download_thread.isRunning():
+            self.log("⚠️ Операция уже выполняется. Проверка отложена.")
+            return
+        channels = getattr(self, "_saved_channels", [])
+        if not channels:
+            ch = self.channel_input.text().strip()
+            channels = [ch] if ch else []
+        if not channels:
+            self.log("⚠️ Нет сохранённых каналов для проверки.")
+            return
+        self.log(f"🔍 Быстрая проверка обновлений ({len(channels)} каналов)...")
+        self.start_scan(channels=channels, limit_per_channel=50)
+
+    def _on_watcher_tick(self):
+        """Периодический тик фонового наблюдателя каналов."""
+        if self.download_thread and self.download_thread.isRunning():
+            return
         api_id = self.api_id_input.text().strip()
         api_hash = self.api_hash_input.text().strip()
-        channel = self.channel_input.text().strip()
-        # Берём техническое значение режима (UserRole), а не отображаемый текст
-        mode = self.mode_combo.currentData() or 'direct'
-        date_from = self.date_from_input.text().strip() or None
-        date_to = self.date_to_input.text().strip() or None
-
-        if not api_id or not api_hash or not channel:
-            QMessageBox.warning(self, "Ошибка", "Пожалуйста, заполните API ID, API Hash и канал.")
+        if not api_id or not api_hash:
             return
-
-        try:
-            api_id = int(api_id)
-        except ValueError:
-            QMessageBox.warning(self, "Ошибка", "API ID должен быть числом.")
+        channels = getattr(self, "_saved_channels", [])
+        if not channels:
             return
+        self.log(f"⏰ Фоновая проверка обновлений каналов ({len(channels)})...")
+        self.start_scan(channels=channels, limit_per_channel=50)
 
-        # Конвертация в MP3 идёт через ffmpeg (вызывается pydub).
-        # Для режимов direct/hybrid без ffmpeg сохранение в MP3 невозможно — предупредим.
-        if not is_ffmpeg_available():
-            if mode == 'record':
-                QMessageBox.critical(
-                    self, "ffmpeg не найден",
-                    "ffmpeg не обнаружен в PATH. Режим записи звука требует ffmpeg "
-                    "для конвертации в MP3.\n\nОперация не может быть выполнена."
-                )
-                return
-            reply = QMessageBox.warning(
-                self, "ffmpeg не найден",
-                "ffmpeg не обнаружен в PATH. Конвертация в MP3 будет недоступна "
-                "(скачанные файлы сохранятся в исходном формате).\n\nПродолжить?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+    def _show_notifications_menu(self):
+        """Отображает контекстное меню управления уведомлениями и фоновым мониторингом."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction, QCursor
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #121620;
+                color: #FFFFFF;
+                border: 1px solid #1E293B;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 18px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #00D2BE;
+                color: #000000;
+                font-weight: 600;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #1E293B;
+                margin: 4px 8px;
+            }
+        """)
+        cfg = load_config()
 
-        save_config(
-            api_id=str(api_id), api_hash=api_hash, channel=channel,
-            mode=mode, date_from=self.date_from_input.text().strip(),
-            date_to=self.date_to_input.text().strip(),
+        act_watcher = QAction(
+            f"Фоновый мониторинг: {'ВКЛ' if self._watcher_enabled else 'ВЫКЛ'}",
+            self,
         )
+        act_watcher.setCheckable(True)
+        act_watcher.setChecked(self._watcher_enabled)
+        act_watcher.triggered.connect(lambda: self.toggle_background_watcher())
+        menu.addAction(act_watcher)
 
-        self.log_output.clear()
-        self.progress_label.clear()
-        self.log("Запуск загрузки...")
+        act_check = QAction("Проверить каналы сейчас", self)
+        act_check.triggered.connect(self.check_channel_updates_now)
+        menu.addAction(act_check)
 
-        self.download_thread = DownloadThread(api_id, api_hash, channel, mode, date_from, date_to, self._proxy_config)
-        self.download_thread.log_signal.connect(self.log)
-        self.download_thread.finished_signal.connect(self.download_finished)
-        self.download_thread.request_code_signal.connect(self.show_input_dialog)
-        self.download_thread.progress_signal.connect(self.update_progress)
-        self.download_thread.start()
+        menu.addSeparator()
 
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        min_tray = cfg.get("minimize_to_tray", True)
+        act_min_tray = QAction("Сворачивать в трей при закрытии", self)
+        act_min_tray.setCheckable(True)
+        act_min_tray.setChecked(min_tray)
+        act_min_tray.triggered.connect(lambda checked: save_config(minimize_to_tray=checked))
+        menu.addAction(act_min_tray)
 
-    def stop_download(self):
-        if self.download_thread:
-            self.log("Запрос на остановку загрузки...")
-            self.download_thread.cancel()
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+        tray_notif = cfg.get("tray_notifications", True)
+        act_notif = QAction("Уведомления на рабочем столе", self)
+        act_notif.setCheckable(True)
+        act_notif.setChecked(tray_notif)
+        act_notif.triggered.connect(lambda checked: save_config(tray_notifications=checked))
+        menu.addAction(act_notif)
 
-    def download_finished(self):
-        self.log("Загрузка завершена.")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.download_thread = None
+        if hasattr(self, "btn_notif"):
+            menu.exec(self.btn_notif.mapToGlobal(self.btn_notif.rect().bottomLeft()))
+        else:
+            menu.exec(QCursor.pos())
+
+    def show_and_activate_window(self):
+        """Восстанавливает и активирует главное окно приложения."""
+        self.show()
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+        )
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        """Обработка клика по иконке трея."""
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            if self.isVisible() and not self.isMinimized():
+                self.show_and_activate_window()
+            else:
+                self.show_and_activate_window()
+
+    def show_tray_notification(
+        self,
+        title: str,
+        message: str,
+        icon=QSystemTrayIcon.MessageIcon.Information,
+        timeout_ms: int = 4000,
+    ):
+        """Отправляет уведомление в системный трей."""
+        show_tray_notification(self, title, message, icon=icon, timeout_ms=timeout_ms)
+
+    def quit_application(self):
+        """Чистый выход из приложения с закрытием окна."""
+        self._force_close = True
+        self.close()
 
     def closeEvent(self, event):
-        self.stop_download()
+        cfg = load_config()
+        minimize_to_tray = cfg.get("minimize_to_tray", True)
+        if (
+            not getattr(self, "_force_close", False)
+            and minimize_to_tray
+            and hasattr(self, "tray_icon")
+            and self.tray_icon
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_tray_minimized_notified", False):
+                self._tray_minimized_notified = True
+                self.show_tray_notification(
+                    "BEATSTORM свёрнут в трей",
+                    "Приложение работает в фоновом режиме. Кликните по иконке в трее для восстановления.",
+                )
+            return
+
+        self._cleanup_on_exit()
         event.accept()
+
+    def _cleanup_on_exit(self):
+        """Очистка ресурсов при завершении работы приложения."""
+        if hasattr(self, "_watcher_timer") and self._watcher_timer.isActive():
+            self._watcher_timer.stop()
+        if hasattr(self, "_player") and self._player:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+        self.stop_download()
+        th = getattr(self, "download_thread", None)
+        if th is not None:
+            is_running_fn = getattr(th, "isRunning", None)
+            if callable(is_running_fn) and is_running_fn():
+                wait_fn = getattr(th, "wait", None)
+                finished_cleanly = False
+                if callable(wait_fn):
+                    try:
+                        finished_cleanly = bool(wait_fn(2000))
+                    except Exception:
+                        pass
+                if not finished_cleanly and is_running_fn():
+                    _LINGERING_THREADS.add(th)
+                    finished_sig = getattr(th, "finished", None)
+                    if finished_sig and hasattr(finished_sig, "connect"):
+                        try:
+                            finished_sig.connect(lambda: _LINGERING_THREADS.discard(th))
+                        except Exception:
+                            pass
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.hide()
+
+    def show_qr_dialog(self, url):
+        logger.debug("show_qr_dialog called")
+        if self.qr_dialog:
+            self.qr_dialog.close()
+        self.qr_dialog = QRCodeDialog(url, self)
+        self.qr_dialog.rejected.connect(lambda: self.stop_download())
+        self.qr_dialog.show()
+        self.qr_dialog.raise_()
+        self.qr_dialog.activateWindow()
+        if self.input_dialog:
+            self.input_dialog.close()
 
     def show_input_dialog(self, prompt):
         logger.debug(f"show_input_dialog called with prompt: {prompt}")
@@ -392,13 +456,10 @@ class MainWindow(QWidget):
             self.input_dialog.show()
             self.input_dialog.raise_()
             self.input_dialog.activateWindow()
-        # Сбрасываем флаг отправки ответа для нового запроса ввода.
         self._input_answered = False
 
     def on_code_entered(self, text):
         logger.debug(f"on_code_entered received: {text}")
-        # Единая точка отправки ответа worker-у. Флаг защищает от повторной отправки
-        # пустой строки в on_dialog_closed, который сработает после закрытия диалога.
         if self._input_answered:
             return
         if self.download_thread and text:
@@ -409,10 +470,240 @@ class MainWindow(QWidget):
 
     def on_dialog_closed(self):
         logger.debug("Input dialog closed")
-        # Если пользователь закрыл окно НЕ вводя ответа (Esc/X), отправляем пустую строку,
-        # чтобы worker не завис в ожидании. Но только если ответ ещё не был отправлен.
         if self._input_answered:
             return
         if self.download_thread:
             self._input_answered = True
             self.download_thread.code_response_signal.emit("")
+
+    # -------------------------------------------------------------
+    # Логика аудиоплеера (Preview Audio Player)
+    # -------------------------------------------------------------
+    def play_audio_file(self, filepath: str, title: str = ""):
+        """Воспроизводит аудиофайл через встроенный QMediaPlayer."""
+        self.player_bar.play_audio_file(filepath, title=title)
+
+    def _toggle_playback(self):
+        self.player_bar.toggle_playback()
+
+    def _stop_playback(self):
+        self.player_bar.stop_playback()
+
+    def _on_media_state_changed(self, state):
+        self.player_bar._on_media_state_changed(state)
+
+    def _on_media_position_changed(self, position_ms):
+        self.player_bar._on_media_position_changed(position_ms)
+
+    def _on_media_duration_changed(self, duration_ms):
+        self.player_bar._on_media_duration_changed(duration_ms)
+
+    def _on_seek_slider_moved(self, value):
+        self.player_bar._on_seek_slider_moved(value)
+
+    def _on_volume_changed(self, value):
+        self.player_bar._on_volume_changed(value)
+
+    @staticmethod
+    def _format_time_ms(ms: int) -> str:
+        return AudioPlayerBar.format_time_ms(ms)
+
+    def _on_track_double_clicked(self, item):
+        track_id = item.data(Qt.ItemDataRole.UserRole)
+        scan_tracks = getattr(self, "_scan_results", []) or []
+        track = next((t for t in scan_tracks if t.get("id") == track_id), None)
+        if not track:
+            return
+        self.play_or_preview_track(track)
+
+    def _on_recent_table_double_clicked(self, item):
+        """Воспроизводит трек из таблицы Recent Releases в Bento Studio при двойном клике или кнопке Play."""
+        if not item or not hasattr(self, "home_recent_table"):
+            return
+        row = item.row()
+        t_item = self.home_recent_table.item(row, 0)
+        a_item = self.home_recent_table.item(row, 1)
+        if not t_item:
+            return
+        filepath = t_item.data(Qt.ItemDataRole.UserRole)
+        artist = a_item.text() if a_item else ""
+        title_text = t_item.text() if t_item else ""
+        title = f"{artist} - {title_text}".strip(" -")
+        if filepath and os.path.exists(filepath):
+            self.player_bar.setVisible(True)
+            self.play_audio_file(filepath, title=title)
+            self.log(f"▶ Воспроизведение: {title}")
+        else:
+            self.log(f"⚠️ Аудиофайл не найден на диске: {filepath or title}")
+
+    def play_or_preview_track(self, track):
+        """Воспроизводит локальный файл или инициирует потоковое предпрослушивание чанков."""
+        filepath = track.get("filepath", "")
+        title = f"{track.get('performer', '')} - {track.get('title', '')}".strip(" -")
+        msg_id = track.get("id")
+        chan = track.get("channel") or self.channel_input.text().strip()
+
+        # 1. Если файл уже полностью сохранен на диске
+        if filepath and os.path.exists(filepath):
+            self.player_bar.setVisible(True)
+            self.play_audio_file(filepath, title=title)
+            self.log(f"▶ Воспроизведение: {title}")
+            return
+
+        # 2. Если уже есть скачанное превью в кэше
+        preview_dir = os.path.join(getattr(self, "base_folder", "telegram_audio"), "previews")
+        if os.path.exists(preview_dir):
+            for ext in (".mp3", ".m4a", ".ogg", ".flac", ".wav"):
+                cand = os.path.join(preview_dir, f"preview_{msg_id}{ext}")
+                if os.path.exists(cand) and os.path.getsize(cand) >= 32 * 1024:
+                    self.player_bar.setVisible(True)
+                    self.play_audio_file(cand, title=f"⚡ [PREVIEW] {title}")
+                    self.log(f"🎧 Воспроизведение из кэша превью: {title}")
+                    return
+
+        # 3. Если загрузка или сканирование заняты
+        if self.download_thread and self.download_thread.isRunning():
+            if getattr(self.download_thread, "preview_track_id", None):
+                try:
+                    self.download_thread.cancel()
+                    self.download_thread.wait(400)
+                except Exception:
+                    pass
+            else:
+                self.player_bar.setVisible(True)
+                self.player_title_label.setText(f"⏳ Файл ещё не скачан: {title}")
+                self.log(f"Поток занят. Файл ещё не скачан: {title}")
+                return
+
+        # 4. Запускаем потоковую буферизацию превью через DownloadThread
+        self.player_bar.setVisible(True)
+        self.player_title_label.setText(f"⚡ Буферизация превью: {title}...")
+        self.log(f"⚡ Запрос потокового предпрослушивания для «{title}»...")
+        self.start_preview_stream(chan, msg_id, title)
+
+    def start_preview_stream(self, channel, track_id, title=""):
+        """Запускает фоновый поток буферизации превью через DownloadThread."""
+        params = self._validate_inputs(require_channel=False)
+        if not params:
+            self.player_title_label.setText(f"⏳ Файл ещё не скачан: {title}")
+            self.log(f"Для превью укажите API ID и API Hash. Файл ещё не скачан: {title}")
+            return
+        api_id, api_hash, default_ch, mode, date_from, date_to = params
+        target_channel = channel or default_ch
+
+        proxy_cfg = self._get_proxy_config() if hasattr(self, "_get_proxy_config") else getattr(self, "_proxy_config", None)
+        self.download_thread = DownloadThread(
+            api_id,
+            api_hash,
+            target_channel,
+            mode,
+            date_from,
+            date_to,
+            proxy_config=proxy_cfg,
+            preview_track_id=track_id,
+        )
+        self.download_thread.log_signal.connect(self.log)
+        self.download_thread.preview_signal.connect(self._on_preview_ready)
+        self.download_thread.finished_signal.connect(self._on_preview_finished)
+        self.download_thread.request_code_signal.connect(self.show_input_dialog)
+        self.download_thread.qr_login_signal.connect(self.show_qr_dialog)
+        self.download_thread.start()
+
+    def _on_preview_ready(self, track_id, preview_path):
+        """Вызывается при получении первых чанков потокового превью."""
+        scan_tracks = getattr(self, "_scan_results", []) or []
+        track = next((t for t in scan_tracks if t.get("id") == track_id), None)
+        title = (
+            f"{track.get('performer', '')} - {track.get('title', '')}".strip(" -")
+            if track
+            else f"Трек #{track_id}"
+        )
+        self.play_audio_file(preview_path, title=f"⚡ [PREVIEW] {title}")
+        self.log(f"🎧 Воспроизведение потокового превью: {title}")
+
+    def _on_preview_finished(self):
+        """Очистка ссылки на поток после завершения буферизации превью."""
+        if self.download_thread and getattr(self.download_thread, "preview_track_id", None):
+            self.download_thread = None
+
+    def keyPressEvent(self, event):
+        """DJ Hotkeys: Space (Play/Pause), X/Enter (Toggle check), Arrows (Seek +-10s), Shift+D (Download), Shift+C (Clear search)."""
+        focused = self.focusWidget()
+        from PyQt6.QtWidgets import (
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+            QSpinBox,
+            QDoubleSpinBox,
+            QComboBox,
+        )
+
+        is_text_input = isinstance(
+            focused,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox),
+        )
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if is_text_input:
+            super().keyPressEvent(event)
+            return
+
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            if key == Qt.Key.Key_D:
+                if hasattr(self, "start_download"):
+                    self.start_download()
+                    event.accept()
+                    return
+            elif key == Qt.Key.Key_C:
+                if hasattr(self, "top_search_input"):
+                    self.top_search_input.clear()
+                if hasattr(self, "search_filter_input"):
+                    self.search_filter_input.clear()
+                if hasattr(self, "channel_search_input"):
+                    self.channel_search_input.clear()
+                if hasattr(self, "_filter_tracks_text"):
+                    self._filter_tracks_text("")
+                event.accept()
+                return
+
+        if key == Qt.Key.Key_Space:
+            if hasattr(self, "player_bar"):
+                if (
+                    self.player_bar._current_audio_path
+                    and self.player_bar._player
+                    and os.path.exists(self.player_bar._current_audio_path)
+                ):
+                    self._toggle_playback()
+                else:
+                    cur_item = (
+                        self.library_tree.currentItem()
+                        if hasattr(self, "library_tree")
+                        else None
+                    )
+                    if cur_item:
+                        self._on_tree_item_double_clicked(cur_item, 0)
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            delta = -10000 if key == Qt.Key.Key_Left else 10000
+            if hasattr(self, "player_bar"):
+                self.player_bar.seek_relative(delta)
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_X, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            cur_item = (
+                self.library_tree.currentItem()
+                if hasattr(self, "library_tree")
+                else None
+            )
+            if cur_item and hasattr(self, "toggle_item_check_state"):
+                self.toggle_item_check_state(cur_item)
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+

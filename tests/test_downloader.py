@@ -97,3 +97,98 @@ class TestAsyncRunAuth:
         dt._cancel_requested = True
         result = await dt.async_run()
         assert result is None
+
+
+class TestProxyClientCreation:
+    def test_socks5_with_auth(self, monkeypatch):
+        import socks
+
+        captured_proxy = []
+
+        def mock_client(*args, **kwargs):
+            captured_proxy.append(kwargs.get("proxy"))
+            return MagicMock()
+
+        monkeypatch.setattr("downloader.TelegramClient", mock_client)
+
+        proxy_cfg = {
+            "enabled": True,
+            "type": "socks5",
+            "host": "proxy.example.com",
+            "port": 1080,
+            "username": "myuser",
+            "password": "mypassword",
+        }
+        dt = DownloadThread(12345, "hash", "@ch", "direct", None, None, proxy_config=proxy_cfg)
+        dt._create_client()
+
+        assert len(captured_proxy) == 1
+        assert captured_proxy[0] == (
+            socks.SOCKS5,
+            "proxy.example.com",
+            1080,
+            True,
+            "myuser",
+            "mypassword",
+        )
+
+    def test_socks5_without_auth(self, monkeypatch):
+        import socks
+
+        captured_proxy = []
+
+        def mock_client(*args, **kwargs):
+            captured_proxy.append(kwargs.get("proxy"))
+            return MagicMock()
+
+        monkeypatch.setattr("downloader.TelegramClient", mock_client)
+
+        proxy_cfg = {
+            "enabled": True,
+            "type": "socks5",
+            "host": "127.0.0.1",
+            "port": 9050,
+        }
+        dt = DownloadThread(12345, "hash", "@ch", "direct", None, None, proxy_config=proxy_cfg)
+        dt._create_client()
+
+        assert len(captured_proxy) == 1
+        assert captured_proxy[0] == (socks.SOCKS5, "127.0.0.1", 9050)
+
+
+class TestConnectionErrorHandling:
+    @pytest.mark.asyncio
+    async def test_connection_error_direct_tunnel_no_proxy_checks(self, monkeypatch):
+        """Проверяет прямое подключение без проверок MTProto сокетов (через системный туннель)."""
+        logs = []
+        dt = DownloadThread(12345, "hash", "@ch", "direct", None, None, proxy_config={"enabled": False})
+        dt.log_signal.connect(logs.append)
+
+        bad_client = AsyncMock()
+        bad_client.connect.side_effect = ConnectionError("Connection to Telegram failed")
+        bad_client.is_connected = MagicMock(return_value=False)
+
+        monkeypatch.setattr("downloader.TelegramClient", lambda *args, **kwargs: bad_client)
+
+        await dt.async_run()
+
+        assert any("Ошибка подключения к Telegram" in log for log in logs)
+        assert not any("автоматическое переподключение" in log for log in logs)
+
+    @pytest.mark.asyncio
+    async def test_proxy_connection_error_logs_proxy_hint(self, monkeypatch):
+        logs = []
+        dt = DownloadThread(12345, "hash", "@ch", "direct", None, None, proxy_config={"enabled": True, "type": "socks5"})
+        dt.log_signal.connect(logs.append)
+
+        bad_client = AsyncMock()
+        bad_client.connect.side_effect = ConnectionError("Proxy refused")
+        bad_client.is_connected = MagicMock(return_value=False)
+
+        monkeypatch.setattr("downloader.TelegramClient", lambda *args, **kwargs: bad_client)
+
+        await dt.async_run()
+
+        assert any("Ошибка подключения к Telegram через прокси" in log for log in logs)
+
+
