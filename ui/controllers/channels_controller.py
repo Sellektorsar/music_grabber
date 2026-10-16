@@ -506,10 +506,16 @@ class ChannelsMixin:
             self.api_hash_input.setText(str(cfg["api_hash"]))
         if cfg.get("channel"):
             self.channel_input.setText(str(cfg["channel"]))
+        # Режимы записи звука и гибрид удалены. В старом конфиге мог
+        # остаться "record" или "hybrid" -- если бы он просто не нашёлся в
+        # списке, выпадающий список остался бы пустым, а currentData()
+        # вернул бы None и режим скачивания тихо сломался бы.
         mode = cfg.get("mode", "direct")
         idx = self.mode_combo.findData(mode)
-        if idx >= 0:
-            self.mode_combo.setCurrentIndex(idx)
+        if idx < 0:
+            logger.info(f"Неизвестный режим {mode!r}, используется прямое скачивание")
+            idx = self.mode_combo.findData("direct")
+        self.mode_combo.setCurrentIndex(max(idx, 0))
         if cfg.get("date_from"):
             self.date_from_input.setText(cfg["date_from"])
         if cfg.get("date_to"):
@@ -588,7 +594,7 @@ class ChannelsMixin:
             "api_id": self.api_id_input.text().strip(),
             "api_hash": self.api_hash_input.text().strip(),
             "channel": self.channel_input.text().strip(),
-            "mode": self.mode_combo.currentData(),
+            "mode": self.mode_combo.currentData() or "direct",
             "date_from": self.date_from_input.text().strip(),
             "date_to": self.date_to_input.text().strip(),
             "max_concurrent_downloads": self.threads_spin.value(),

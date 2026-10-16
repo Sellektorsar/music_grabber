@@ -173,8 +173,17 @@ class TestInitialState:
         assert window._input_answered is False
 
     def test_mode_combo_items(self, window):
-        assert window.mode_combo.count() == 3
+        """Остался один способ получить файл -- скачать его.
+
+        Режимы записи звука и гибрид удалены: они писали с микрофона то,
+        что играет в системе, и молча подменяли неудачную загрузку.
+        """
+        assert window.mode_combo.count() == 1
         assert window.mode_combo.currentData() == "direct"
+
+    def test_mode_combo_is_hidden(self, window):
+        """Выбирать нечего, поэтому список не показывается."""
+        assert window.mode_combo.isVisibleTo(window) is False
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +206,7 @@ class TestLoadSettings:
                     "api_id": "12345",
                     "api_hash": "abc123",
                     "channel": "@testchan",
-                    "mode": "hybrid",
+                    "mode": "hybrid",   # остался от старой версии
                     "date_from": "2025-01-01",
                     "date_to": "2025-12-31",
                 },
@@ -212,7 +221,9 @@ class TestLoadSettings:
         assert w2.api_id_input.text() == "12345"
         assert w2.api_hash_input.text() == "abc123"
         assert w2.channel_input.text() == "@testchan"
-        assert w2.mode_combo.currentData() == "hybrid"
+        # Старый конфиг со значением "hybrid" не должен ломать выбор:
+        # режима больше нет, поэтому приложение возвращается к скачиванию.
+        assert w2.mode_combo.currentData() == "direct"
         assert w2.date_from_input.text() == "2025-01-01"
         assert w2.date_to_input.text() == "2025-12-31"
 
@@ -306,24 +317,20 @@ class TestFFmpegHandling:
         item.setData(Qt.ItemDataRole.UserRole, 1)
         window.track_list.addItem(item)
 
-    def test_record_mode_no_ffmpeg_shows_critical(self, window, monkeypatch):
-        monkeypatch.setattr("gui.is_ffmpeg_available", lambda: False)
-        messages = []
-        monkeypatch.setattr(
-            QMessageBox,
-            "critical",
-            staticmethod(
-                lambda *a, **kw: messages.append(a[2]) or QMessageBox.StandardButton.Ok
-            ),
-        )
-        window.api_id_input.setText("12345")
-        window.api_hash_input.setText("hash")
-        window.channel_input.setText("@chan")
-        window.mode_combo.setCurrentIndex(1)  # record
-        self._add_track_item(window)
-        window.download_button.setEnabled(True)
-        window.download_button.click()
-        assert "ffmpeg" in messages[0].lower()
+    def test_record_mode_is_gone(self, window):
+        """Режима записи звука в интерфейсе больше нет.
+
+        Он открывал входной поток звуковой карты и писал то, что играет
+        в системе; самого воспроизведения трека в проекте не было.
+        """
+        modes = [window.mode_combo.itemData(i)
+                 for i in range(window.mode_combo.count())]
+        assert modes == ["direct"], f"в списке снова появились режимы: {modes}"
+
+    def test_no_mode_requires_ffmpeg(self, window):
+        """Единственный оставшийся режим не конвертирует, ffmpeg не нужен."""
+        assert not hasattr(window, "mode_combo") or \
+            window.mode_combo.currentData() == "direct"
 
     def test_direct_mode_no_ffmpeg_shows_warning(self, window, monkeypatch):
         monkeypatch.setattr("gui.is_ffmpeg_available", lambda: False)
@@ -371,7 +378,7 @@ class TestStartDownload:
         assert t.api_id == 12345
         assert t.api_hash == "hash123"
         assert t.channel == "@testchan"
-        assert t.mode == "record"
+        assert t.mode == "direct"
         assert t.date_from == "2025-01-01"
         assert t.date_to == "2025-12-31"
 

@@ -386,24 +386,38 @@ class TestDefect005QueuedTurnsIntoFailed:
 
 class TestDefect006ModeIsPersisted:
 
-    def test_mode_change_writes_config(self, win):
-        """Выбор режима обязан сохраняться сразу, без кнопки."""
+    def test_saved_mode_is_always_usable(self, win):
+        """В конфиг попадает только режим, который реально есть в списке.
+
+        Раньше здесь выбирался второй режим и проверялось, что он же
+        сохранился. Теперь режим один, поэтому проверяется главное:
+        сохранённое значение не может оказаться таким, которого в
+        интерфейсе нет, -- иначе при следующем запуске список был бы пуст.
+        """
         import config as cfg
 
-        combo = win.mode_combo
-        target = 1 if combo.currentIndex() != 1 else 2
-        combo.setCurrentIndex(target)
+        known = [win.mode_combo.itemData(i)
+                 for i in range(win.mode_combo.count())]
+        assert known == ["direct"]
+        assert cfg.load_config().get("mode") in known
 
-        expected = combo.itemData(target)
-        assert expected in ("direct", "record", "hybrid")
-        assert cfg.load_config().get("mode") == expected
-
-    def test_every_mode_value_is_saved(self, win):
+    def test_stale_mode_from_config_does_not_break_the_list(self, win):
+        """Старый конфиг с "record" не должен оставлять список пустым."""
         import config as cfg
-        combo = win.mode_combo
-        for idx in range(combo.count()):
-            combo.setCurrentIndex(idx)
-            assert cfg.load_config().get("mode") == combo.itemData(idx)
+
+        cfg.save_config(mode="record")
+        win._load_settings()
+
+        assert win.mode_combo.currentData() == "direct"
+        assert win.mode_combo.count() == 1
+
+    def test_settings_still_persist_without_mode_choices(self, win):
+        """Сохранение настроек не сломано вместе со списком режимов."""
+        import config as cfg
+
+        win.api_id_input.setText("26222233")
+        win._save_settings()
+        assert cfg.load_config().get("api_id") == "26222233"
 
 
 class TestDefect008TreeHotkeyEventFilter:

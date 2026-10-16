@@ -72,25 +72,14 @@ class DownloadMixin:
         self._report_progress()
         succeeded = False
         try:
-            if self.mode in ['direct', 'hybrid']:
-                if await self.try_direct_download(message, file_path):
-                    succeeded = True
-
-            if not succeeded and self.mode in ['record', 'hybrid']:
-                duration = self.get_audio_duration(message)
-                if duration:
-                    await asyncio.to_thread(self.record_audio, duration, file_path)
-                    # record_audio() перехватывает PortAudioError внутри себя и
-                    # возвращается без исключения, поэтому прежний код безусловно
-                    # помечал трек успешным. Проверяем фактическое наличие файла.
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        succeeded = True
-                    else:
-                        self.log(
-                            f"Запись аудио не удалась (файл не создан): {os.path.basename(file_path)}"
-                        )
-                else:
-                    self.log("Не удалось определить длительность аудио для записи")
+            # Единственный способ получить файл -- скачать его из Telegram.
+            # Раньше здесь была ветка записи с звуковой карты и запасной
+            # вариант "гибрид", который при неудачном скачивании писал с
+            # микрофона то, что играет в системе, и помечал результат
+            # успешным. Само воспроизведение трека в проекте отсутствовало,
+            # поэтому режимы "record" и "hybrid" удалены из интерфейса.
+            if await self.try_direct_download(message, file_path):
+                succeeded = True
         except Exception as e:
             self.log(f"Ошибка обработки сообщения: {e}")
             self.log(traceback.format_exc())

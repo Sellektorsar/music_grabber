@@ -114,70 +114,41 @@ class TestDirectModeSuccess:
         assert r._last_completed_id == 1
 
 
-class TestHybridModeFallback:
-    """В гибридном режиме неудача прямой загрузки не fatal."""
+class TestRecordBranchRemoved:
+    """Режим записи звука удалён, ветки быть не должно.
 
-    def test_falls_back_to_recording(self, r, tmp_path):
-        r.mode = "hybrid"
+    Раньше при неудаче прямого скачивания приложение писало с
+    микрофона то, что играет в системе, и помечало файл успешным.
+    Теперь единственный путь -- скачать трек из Telegram.
+    """
+
+    def test_failed_download_does_not_fall_back_to_microphone(self, r, tmp_path):
         path = str(tmp_path / "track.mp3")
-        calls = []
-
-        async def _fail(message, file_path):
-            return False
-
-        def _record(duration, file_path):
-            calls.append(duration)
-            with open(file_path, "wb") as fh:
-                fh.write(b"\x00" * 2048)
-
-        r.try_direct_download = _fail
-        r.record_audio = _record
-        r.get_audio_duration = MagicMock(return_value=180.0)
-
-        _run(r.process_message(_message(), path))
-
-        assert calls == [180.0], "запись с карты должна быть вызвана"
-        assert r._downloaded == 1
-
-    def test_recording_without_file_is_not_success(self, r, tmp_path):
-        """Карта молчала -- файл не создан, трек не должен считаться скачанным.
-
-        Именно на этом уже находился дефект: исключение PortAudioError
-        перехватывалось внутри record_audio, и трек помечался успешным.
-        """
-        r.mode = "hybrid"
-        path = str(tmp_path / "missing.mp3")
+        r.record_audio = MagicMock(side_effect=AssertionError(
+            "микрофон не должен трогаться"))
 
         async def _fail(message, file_path):
             return False
 
         r.try_direct_download = _fail
-        r.record_audio = MagicMock(return_value=None)   # файл не создан
-        r.get_audio_duration = MagicMock(return_value=180.0)
-
         _run(r.process_message(_message(), path))
 
-        assert r._downloaded == 0
+        r.record_audio.assert_not_called()
         assert r._last_failed_id == 1
-        assert any("Запись аудио не удалась" in c[0][0]
-                   for c in r.log.call_args_list)
 
-    def test_unknown_duration_is_reported(self, r, tmp_path):
-        r.mode = "hybrid"
+    def test_silence_is_never_marked_as_success(self, r, tmp_path):
+        """Прежний баг: файл из тишины попадал в базу как скачанный."""
+        rec.db_module.record_download.assert_not_called()
         path = str(tmp_path / "track.mp3")
 
         async def _fail(message, file_path):
             return False
 
         r.try_direct_download = _fail
-        r.record_audio = MagicMock()
-        r.get_audio_duration = MagicMock(return_value=0)
-
         _run(r.process_message(_message(), path))
 
-        assert any("Не удалось определить длительность" in c[0][0]
-                   for c in r.log.call_args_list)
-        assert r._downloaded == 0
+        rec.db_module.record_download.assert_not_called()
+        assert r._downloaded_playlist_entries == []
 
 
 class TestFailurePaths:

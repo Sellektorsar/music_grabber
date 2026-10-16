@@ -36,10 +36,6 @@ from audio_converter import (
     write_id3_tags,
     read_id3_tags,
 )
-from audio_capture import (
-    record_audio,
-    save_recording,
-)
 import database as db_module
 from config import BASE_PATH, DEFAULT_CONFIG, get_base_dir, load_config
 from recorder_download import DownloadMixin
@@ -123,7 +119,7 @@ class TelegramAudioRecorder(DownloadMixin):
         self,
         client,
         channel,
-        mode='hybrid',
+        mode='direct',
         date_from=None,
         date_to=None,
         logger_callback=None,
@@ -792,26 +788,6 @@ class TelegramAudioRecorder(DownloadMixin):
     def convert_to_mp3(self, src_path, dest_path):
         bitrate = getattr(self, "mp3_bitrate", None) or _MP3_BITRATE
         return convert_to_mp3(src_path, dest_path, bitrate=bitrate)
-
-    def record_audio(self, duration, filename):
-        bitrate = getattr(self, "mp3_bitrate", None) or _MP3_BITRATE
-        return record_audio(
-            duration,
-            filename,
-            is_cancelled_fn=lambda: self._cancelled,
-            sample_rate=_SAMPLE_RATE,
-            bitrate=bitrate,
-            log_callback=self.log,
-        )
-
-    def save_recording(self, data, fs, filename):
-        return save_recording(
-            data,
-            fs,
-            filename,
-            bitrate=_MP3_BITRATE,
-            log_callback=self.log,
-        )
 
     def _get_audio_meta(self, message):
         return get_audio_meta(message)
