@@ -426,3 +426,76 @@ class TestQtLifecycleAndTreeSafety:
             # Количество активных бейджей в дереве всегда строго равно размеру пачки (15)
             assert len(test_window._track_status_badges) == 15
             assert len(test_window._track_waveforms) == 15
+
+
+class TestDirectDownloadAndUIRegression:
+    """Проверяет точечные исправления прямого скачивания, чекбоксов и аудиоплеера."""
+
+    def test_recorder_base_folder_initialized(self):
+        client = AsyncMock()
+        rec = TelegramAudioRecorder(client, channel="@testpool")
+        assert hasattr(rec, "base_folder")
+        assert rec.base_folder is not None
+        assert os.path.isabs(rec.base_folder)
+
+    def test_library_tree_column_0_width_and_indentation(self, test_window):
+        # Колонка отметки ужата с 60 до 46 px в рамках DEFECT-019: сумма
+        # фиксированных колонок не должна выдавливать STATUS за край при
+        # ширине окна в половину экрана.
+        assert 40 <= test_window.library_tree.columnWidth(0) <= 50
+        assert test_window.library_tree.indentation() == 12
+
+    def test_download_thread_selected_channel_map_initialization(self):
+        from downloader import DownloadThread
+        thread = DownloadThread(
+            api_id="12345",
+            api_hash="hash",
+            channel="@main",
+            mode="direct",
+            date_from="2026-01-01",
+            date_to="2026-01-02",
+            selected_ids=[101, 102],
+            selected_channel_map={"@pool": [101, 102]},
+        )
+        assert thread.selected_channel_map == {"@pool": [101, 102]}
+        assert thread.selected_ids == {101, 102}
+
+    def test_audio_player_guards_against_non_files(self, test_window, tmp_path):
+        logged_msgs = []
+        test_window.player_bar.log_callback = lambda m: logged_msgs.append(m)
+
+        # 1. Non-file (directory)
+        test_window.player_bar.play_audio_file(str(tmp_path))
+        assert test_window.player_bar._current_audio_path != str(tmp_path)
+
+        # 2. Empty string
+        test_window.player_bar.play_audio_file("")
+        assert test_window.player_bar._current_audio_path != ""
+
+        # 3. Non-existent file
+        ghost = str(tmp_path / "non_existent.mp3")
+        test_window.player_bar.play_audio_file(ghost)
+        assert any("Файл не найден" in m for m in logged_msgs)
+
+    def test_home_recent_table_checkbox_synchronization(self, test_window):
+        from PyQt6.QtWidgets import QTableWidgetItem
+        from PyQt6.QtCore import Qt
+
+        tracks = [{"id": 501, "title": "Track 501", "performer": "DJ X", "channel": "@pool", "date": "2026-10-09"}]
+        test_window._on_scan_results(tracks)
+        test_window._refresh_home_view()
+
+        assert test_window.home_recent_table.rowCount() >= 1
+        t_item = test_window.home_recent_table.item(0, 0)
+        assert t_item is not None
+        initial_state = t_item.checkState()
+
+        # Toggle state in recent table
+        target_state = Qt.CheckState.Unchecked if initial_state == Qt.CheckState.Checked else Qt.CheckState.Checked
+        t_item.setCheckState(target_state)
+        test_window._on_recent_table_item_changed(t_item)
+
+        # Verify track_list has synchronized target check state
+        l_item = test_window._track_list_item_by_id.get(501)
+        assert l_item is not None
+        assert l_item.checkState() == target_state

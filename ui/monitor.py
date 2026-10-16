@@ -11,7 +11,10 @@ from PyQt6.QtWidgets import (
     QWidget,
     QProgressBar,
     QTextEdit,
+    QSizePolicy,
+    QScrollArea,
 )
+from PyQt6.QtCore import Qt
 from ui.widgets import SpeedMeterWidget
 
 
@@ -20,9 +23,27 @@ def setup_download_monitor(window) -> QFrame:
     window.right_panel = QFrame()
     window.right_panel.setObjectName("panelCard")
     window.right_panel.setFixedWidth(235)
-    right_layout = QVBoxLayout(window.right_panel)
+    outer_layout = QVBoxLayout(window.right_panel)
+    outer_layout.setContentsMargins(0, 0, 0, 0)
+    outer_layout.setSpacing(0)
+
+    # Контент панели помещается в прокручиваемую область: при малой высоте
+    # окна (например, когда открыт drawer настроек) секции переставали
+    # помещаться и Qt накладывал их друг на друга — график проходил по
+    # тексту меток, «STORAGE STATS» печатался поверх подписей скорости.
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setStyleSheet("background: transparent; border: none;")
+
+    content = QWidget()
+    content.setStyleSheet("background: transparent;")
+    right_layout = QVBoxLayout(content)
     right_layout.setContentsMargins(12, 12, 12, 12)
     right_layout.setSpacing(10)
+    scroll.setWidget(content)
+    outer_layout.addWidget(scroll)
 
     # Заголовок правой панели
     mon_header = QHBoxLayout()
@@ -106,18 +127,27 @@ def setup_download_monitor(window) -> QFrame:
     speed_hdr.addWidget(speed_chev)
     right_layout.addLayout(speed_hdr)
 
-    window.speed_meter = SpeedMeterWidget()
-    right_layout.addWidget(window.speed_meter)
+    speed_block = QWidget()
+    speed_block_layout = QVBoxLayout(speed_block)
+    speed_block_layout.setContentsMargins(0, 0, 0, 0)
+    speed_block_layout.setSpacing(3)
 
-    speed_stats_layout = QVBoxLayout()
-    speed_stats_layout.setSpacing(2)
+    window.speed_meter = SpeedMeterWidget()
+    speed_block_layout.addWidget(window.speed_meter)
+
     window.spd_current = QLabel("Current:   0.0 MB/s")
     window.spd_average = QLabel("Average:   0.0 MB/s")
     window.spd_total = QLabel("Total DL:  0 треков")
     for slbl in (window.spd_current, window.spd_average, window.spd_total):
         slbl.setStyleSheet("font-size: 10px; color: #94A3B8; font-family: monospace;")
-        speed_stats_layout.addWidget(slbl)
-    right_layout.addLayout(speed_stats_layout)
+        slbl.setFixedHeight(15)
+        speed_block_layout.addWidget(slbl)
+    # Блок неразжимаем: при нехватке высоты правой панели (например, когда
+    # открыт drawer настроек) QVBoxLayout переставал вмещать секции и виджеты
+    # накладывались друг на друга — график проходил по тексту меток.
+    speed_block.setMinimumHeight(50 + 3 * 15 + 3 * 3 + 6)
+    speed_block.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    right_layout.addWidget(speed_block)
 
     # STORAGE STATS (Память диска)
     storage_hdr = QHBoxLayout()

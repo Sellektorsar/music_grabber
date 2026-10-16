@@ -1,11 +1,31 @@
+# Покрытие измеряется только по коду приложения.
+#
+# Одноразовые скрипты разработчика (инспектор интерфейса, прототипы,
+# рендер-превью, ручной стенд загрузки) в повседневной работе не
+# участвуют. Раньше они давали нулевое покрытие и занижали показатель
+# всего проекта примерно на 8 процентных пунктов.
 [run]
+branch = False
 omit =
     tests/*
+    night_qa/*
+    inspect_ui.py
+    run_test_download.py
+    prototype_beatstorm.py
+    render_bento_studio_live.py
+    render_beatstorm_preview.py
+    launch.py
+    scratch_test_beatstorm.py
+    stress_memory_check.py
+    htmlcov/*
+    build/*
+    dist/*
     .venv/*
-    .env/*
+    venv/*
 
 [report]
 exclude_lines =
     pragma: no cover
-    if __name__ == "__main__":
+    if __name__ == .__main__.:
     raise NotImplementedError
+    if TYPE_CHECKING:

@@ -233,6 +233,7 @@ class CamelotWheelWidget(QWidget):
         self.btn_reset.setStyleSheet(STYLE_RESET_BTN)
         self.btn_reset.setToolTip("Сбросить фильтр тональностей / показать все треки")
         self.btn_reset.clicked.connect(self.clear_selection)
+        self.reset_btn = self.btn_reset
 
         header_layout.addWidget(lbl_title)
         header_layout.addStretch()
@@ -727,8 +728,12 @@ class TrackInspectorCard(QFrame):
         from media_utils import clean_promo_text, smart_title_case
         cur_t = self.edit_title.text()
         cur_a = self.edit_artist.text()
-        self.edit_title.setText(smart_title_case(clean_promo_text(cur_t)))
-        self.edit_artist.setText(smart_title_case(clean_promo_text(cur_a)))
+        clean_t = smart_title_case(clean_promo_text(cur_t))
+        clean_a = smart_title_case(clean_promo_text(cur_a))
+        self.edit_title.setText(clean_t)
+        self.edit_artist.setText(clean_a)
+        self.lbl_title.setText(clean_t or "Unknown Title")
+        self.lbl_artist.setText(clean_a or "Unknown Artist")
         self._update_export_preview()
 
     def inspect_track(self, track_data: dict | None) -> None:

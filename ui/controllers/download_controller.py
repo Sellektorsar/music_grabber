@@ -16,6 +16,7 @@ import logging
 from PyQt6.QtWidgets import QMessageBox
 
 from downloader import DownloadThread
+from config import BASE_PATH
 from ui.dialogs import ProxySettingsDialog, is_ffmpeg_available
 from ui.widgets import create_waveform_pixmap
 
@@ -92,8 +93,11 @@ class DownloadControllerMixin:
 
     def open_download_folder(self):
         channel = self.channel_input.text().strip()
-        base_dir = "telegram_audio"
-        folder = os.path.abspath(base_dir)
+        # Единый абсолютный путь из config: относительный путь разрешался бы
+        # от текущего каталога процесса, и при запуске из ярлыка кнопка
+        # открывала бы не ту папку, а os.makedirs оставлял бы пустую копию.
+        base_dir = BASE_PATH
+        folder = base_dir
         if channel:
             clean_name = (
                 channel.lstrip("@")
@@ -139,7 +143,7 @@ class DownloadControllerMixin:
         self.log(f"🚀 Авто-сканирование сохраненных каналов ({len(channels)})...")
         self.start_scan(channels=channels, limit_per_channel=100)
 
-    def start_scan(self, channels=None, limit_per_channel=100):
+    def start_scan(self, channels=None, limit_per_channel=100, search_query=None):
         th = getattr(self, "download_thread", None)
         if th is not None and getattr(th, "isRunning", lambda: False)():
             self.log("⚠️ Предыдущая операция ещё выполняется. Дождитесь завершения или нажмите «Стоп».")
@@ -168,6 +172,8 @@ class DownloadControllerMixin:
         self._current_scan_channels = list(target_channels)
         self._channel_offsets = {}
         self._no_more_tracks = False
+        sq = search_query.strip() if search_query and isinstance(search_query, str) else None
+        self._current_search_query = sq
 
         self.log_output.clear()
         self.progress_label.clear()
@@ -182,20 +188,46 @@ class DownloadControllerMixin:
             self.btn_load_more.setVisible(False)
         if hasattr(self, "batch_bar"):
             self.batch_bar.setVisible(False)
-            self.search_filter_input.clear()
+            if not sq:
+                self.search_filter_input.clear()
         self.download_button.setEnabled(False)
 
-        if len(target_channels) > 1:
-            self.log(f"Сканирование сохраненных каналов ({len(target_channels)}): {', '.join(target_channels)}...")
-        else:
-            ch_disp = target_channels[0] if target_channels else (channel or "—")
-            self.log(f"Сканирование канала {ch_disp}...")
+        ch_disp = (
+            ", ".join(target_channels)
+            if len(target_channels) > 1
+            else (target_channels[0] if target_channels else (channel or "—"))
+        )
 
-        if hasattr(self, "status_badge"):
-            self.status_badge.setText("● SCANNING POOL...")
-            self.status_badge.setStyleSheet(
-                "background-color: #261E10; border: 1px solid #784E10; border-radius: 12px; padding: 4px 12px; font-size: 11px; font-weight: 700; color: #FFB300;"
-            )
+        if sq:
+            self.log(f"🔎 Глобальный поиск по запросу '{sq}' в ({ch_disp})...")
+            if hasattr(self, "status_badge"):
+                self.status_badge.setText("● SEARCHING...")
+                self.status_badge.setStyleSheet(
+                    "background-color: #261E10; border: 1px solid #784E10; border-radius: 12px; padding: 4px 12px; font-size: 11px; font-weight: 700; color: #FFB300;"
+                )
+        else:
+            if len(target_channels) > 1:
+                self.log(f"Сканирование сохраненных каналов ({len(target_channels)}): {ch_disp}...")
+            else:
+                self.log(f"Сканирование канала {ch_disp}...")
+
+            if hasattr(self, "status_badge"):
+                self.status_badge.setText("● SCANNING POOL...")
+                self.status_badge.setStyleSheet(
+                    "background-color: #261E10; border: 1px solid #784E10; border-radius: 12px; padding: 4px 12px; font-size: 11px; font-weight: 700; color: #FFB300;"
+                )
+
+        old_th = getattr(self, "download_thread", None)
+        if old_th is not None:
+            from gui import _LINGERING_THREADS
+            _LINGERING_THREADS.add(old_th)
+            try:
+                finished_sig = getattr(old_th, "finished", None)
+                if finished_sig and hasattr(finished_sig, "connect"):
+                    finished_sig.connect(lambda t=old_th: _LINGERING_THREADS.discard(t))
+            except Exception:
+                pass
+            self.download_thread = None
 
         self.download_thread = _get_download_thread_cls()(
             api_id,
@@ -209,6 +241,7 @@ class DownloadControllerMixin:
             channels=target_channels,
             limit_per_channel=limit_per_channel,
             channel_offsets=self._channel_offsets,
+            search_query=sq,
         )
         self.download_thread.log_signal.connect(self.log)
         self.download_thread.finished_signal.connect(self._scan_finished)
@@ -223,6 +256,48 @@ class DownloadControllerMixin:
             self.bento_btn_scan.setEnabled(False)
         if hasattr(self, "bento_btn_stop"):
             self.bento_btn_stop.setEnabled(True)
+
+    def _search_channel_history(self, query=None):
+        """Запуск поиска по всей истории Telegram-канала через MTProto."""
+        if not isinstance(query, str) or not query.strip():
+            candidates = []
+            if hasattr(self, "search_filter_input"):
+                candidates.append(self.search_filter_input.text().strip())
+            if hasattr(self, "top_search_input"):
+                candidates.append(self.top_search_input.text().strip())
+            if hasattr(self, "home_search_input"):
+                candidates.append(self.home_search_input.text().strip())
+            query = next((c for c in candidates if c), "")
+
+        query = query.strip()
+        if not query:
+            self.log("⚠️ Введите запрос для поиска по всей истории канала.")
+            return
+
+        if hasattr(self, "search_filter_input") and self.search_filter_input.text() != query:
+            self.search_filter_input.blockSignals(True)
+            self.search_filter_input.setText(query)
+            self.search_filter_input.blockSignals(False)
+        if hasattr(self, "top_search_input") and self.top_search_input.text() != query:
+            self.top_search_input.blockSignals(True)
+            self.top_search_input.setText(query)
+            self.top_search_input.blockSignals(False)
+        if hasattr(self, "home_search_input") and self.home_search_input.text() != query:
+            self.home_search_input.blockSignals(True)
+            self.home_search_input.setText(query)
+            self.home_search_input.blockSignals(False)
+
+        from config import DEFAULT_SEARCH_LIMIT
+
+        chan = self.channel_input.text().strip() if hasattr(self, "channel_input") else ""
+        saved = getattr(self, "_saved_channels", []) or []
+        target_channels = None
+        if chan and chan != "__ALL__":
+            target_channels = [chan]
+        elif saved:
+            target_channels = list(saved)
+
+        self.start_scan(channels=target_channels, limit_per_channel=DEFAULT_SEARCH_LIMIT, search_query=query)
 
     def _load_more_tracks(self):
         """Прогрессивная подгрузка следующей порции треков из каналов по мере скроллинга."""
@@ -266,6 +341,7 @@ class DownloadControllerMixin:
             channels=active_channels,
             limit_per_channel=100,
             channel_offsets=getattr(self, "_channel_offsets", {}),
+            search_query=getattr(self, "_current_search_query", None),
         )
         self.download_thread.log_signal.connect(self.log)
         self.download_thread.finished_signal.connect(self._scan_finished)
@@ -342,7 +418,10 @@ class DownloadControllerMixin:
             self.btn_load_more.setVisible(len(tracks) > 0)
 
         if hasattr(self, "status_badge"):
-            self.status_badge.setText("● POOL READY" if tracks else "● STANDBY")
+            if getattr(self, "_current_search_query", None):
+                self.status_badge.setText(f"● FOUND: {len(tracks)}" if tracks else "● NOT FOUND")
+            else:
+                self.status_badge.setText("● POOL READY" if tracks else "● STANDBY")
             self.status_badge.setStyleSheet(
                 "background-color: #161A24; border: 1px solid #252D3D; border-radius: 12px; padding: 4px 12px; font-size: 11px; font-weight: 700; color: #00E5FF;"
             )
@@ -352,16 +431,28 @@ class DownloadControllerMixin:
             if hasattr(self, "bento_btn_download"):
                 self.bento_btn_download.setEnabled(True)
             self._update_download_button_counter()
-            self.log(
-                f"Найдено {len(tracks)} треков. Выберите нужные и нажмите «Скачать выбранное»."
-            )
+            if getattr(self, "_current_search_query", None):
+                self.log(
+                    f"🔎 Найдено {len(tracks)} треков по запросу '{self._current_search_query}'."
+                )
+            else:
+                self.log(
+                    f"Найдено {len(tracks)} треков. Выберите нужные и нажмите «Скачать выбранное»."
+                )
             if hasattr(self, "show_tray_notification") and not self.isVisible():
                 self.show_tray_notification(
                     "BEATSTORM Watcher",
                     f"Обнаружено {len(tracks)} новых треков в канале!",
                 )
+        elif getattr(self, "_current_search_query", None):
+            self.log(f"ℹ️ По запросу '{self._current_search_query}' треков в канале не найдено.")
 
     def _scan_finished(self):
+        sender = self.sender() if hasattr(self, "sender") else None
+        curr_th = getattr(self, "download_thread", None)
+        if sender is not None and curr_th is not None and sender is not curr_th:
+            return
+
         self._is_paginating = False
         self.scan_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -369,7 +460,19 @@ class DownloadControllerMixin:
             self.bento_btn_scan.setEnabled(True)
         if hasattr(self, "bento_btn_stop"):
             self.bento_btn_stop.setEnabled(False)
-        self.download_thread = None
+
+        th = getattr(self, "download_thread", None)
+        if th is not None:
+            from gui import _LINGERING_THREADS
+            _LINGERING_THREADS.add(th)
+            try:
+                finished_sig = getattr(th, "finished", None)
+                if finished_sig and hasattr(finished_sig, "connect"):
+                    finished_sig.connect(lambda t=th: _LINGERING_THREADS.discard(t))
+            except Exception:
+                pass
+            self.download_thread = None
+
         if hasattr(self, "status_badge"):
             self.status_badge.setText("● POOL READY" if self._scan_results else "● STANDBY")
             self.status_badge.setStyleSheet(
@@ -413,10 +516,66 @@ class DownloadControllerMixin:
         from PyQt6.QtCore import Qt
 
         selected_ids = []
-        for i in range(self.track_list.count()):
-            item = self.track_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                selected_ids.append(item.data(Qt.ItemDataRole.UserRole))
+        selected_channel_map = {}
+
+        def _collect(mid, ch):
+            if mid in selected_ids:
+                return
+            selected_ids.append(mid)
+            if ch:
+                selected_channel_map.setdefault(ch, []).append(mid)
+
+        # Приоритет у library_tree: на вкладке Library пользователь оставляет
+        # галочки именно в дереве, а скрытый track_list — его зеркало с
+        # устаревшим состоянием. Раньше выбор игнорировался и скачивались
+        # ВСЕ треки диапазона вместо отмеченных.
+        tree_ids = []
+        if hasattr(self, "library_tree") and self.library_tree:
+            tree = self.library_tree
+            known = getattr(self, "_track_by_id", {})
+
+            def _walk(parent):
+                for idx in range(parent.childCount()):
+                    child = parent.child(idx)
+                    _walk(child)
+                    raw = child.data(0, Qt.ItemDataRole.UserRole)
+                    # Элемент трека — только тот, чей UserRole содержит msg_id,
+                    # присутствующий в _track_by_id. Группы дат и каналов
+                    # хранят там строки, их в выборку не включаем.
+                    if isinstance(raw, int) and raw in known:
+                        if child.checkState(0) == Qt.CheckState.Checked:
+                            tree_ids.append(raw)
+
+            for top in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(top))
+
+        if tree_ids or (hasattr(self, "library_tree") and self.library_tree.topLevelItemCount()):
+            for mid in tree_ids:
+                t_data = getattr(self, "_track_by_id", {}).get(mid, {})
+                _collect(mid, t_data.get("channel") or channel or "")
+            # Пользователь действует в дереве Library: home_recent_table здесь
+            # не при чём — он отмечен по умолчанию и добавлял ВСЕ треки,
+            # из-за чего выбор снова игнорировался.
+            tree_is_source = True
+        else:
+            for i in range(self.track_list.count()):
+                item = self.track_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    mid = item.data(Qt.ItemDataRole.UserRole)
+                    t_data = getattr(self, "_track_by_id", {}).get(mid, {})
+                    _collect(mid, t_data.get("channel") or channel or "")
+            tree_is_source = False
+
+        if not tree_is_source and hasattr(self, "home_recent_table") and self.home_recent_table:
+            for r in range(self.home_recent_table.rowCount()):
+                t_it = self.home_recent_table.item(r, 0)
+                if t_it and t_it.checkState() == Qt.CheckState.Checked:
+                    t_data = t_it.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(t_data, dict):
+                        mid = t_data.get("id") or t_data.get("message_id")
+                        ch = t_data.get("channel") or t_data.get("channel_id") or channel or ""
+                        if mid:
+                            _collect(mid, ch)
 
         if not selected_ids:
             QMessageBox.warning(
@@ -451,7 +610,21 @@ class DownloadControllerMixin:
                     """)
                     badge.setToolTip("Трек находится в очереди на скачивание")
 
-        active_channels = getattr(self, "_current_scan_channels", None) or ([channel] if channel else getattr(self, "_saved_channels", []))
+        active_channels = list(selected_channel_map.keys()) if selected_channel_map else (
+            getattr(self, "_current_scan_channels", None) or ([channel] if channel else getattr(self, "_saved_channels", []))
+        )
+        old_th = getattr(self, "download_thread", None)
+        if old_th is not None:
+            from gui import _LINGERING_THREADS
+            _LINGERING_THREADS.add(old_th)
+            try:
+                finished_sig = getattr(old_th, "finished", None)
+                if finished_sig and hasattr(finished_sig, "connect"):
+                    finished_sig.connect(lambda t=old_th: _LINGERING_THREADS.discard(t))
+            except Exception:
+                pass
+            self.download_thread = None
+
         self.download_thread = _get_download_thread_cls()(
             api_id,
             api_hash,
@@ -464,6 +637,7 @@ class DownloadControllerMixin:
             max_concurrent_downloads=self.threads_spin.value(),
             mp3_bitrate=self.bitrate_combo.currentText(),
             channels=active_channels,
+            selected_channel_map=selected_channel_map,
         )
         self.download_thread.log_signal.connect(self.log)
         self.download_thread.finished_signal.connect(self.download_finished)
@@ -585,20 +759,23 @@ class DownloadControllerMixin:
                 if row is not None and row < len(self._scan_results):
                     self._scan_results[row]["already_exists"] = True
 
-            failed_id = data.get("last_failed_id")
-            if failed_id and failed_id in self._track_status_badges:
-                badge = self._track_status_badges[failed_id]
-                badge.setText("FAILED")
-                badge.setStyleSheet("""
-                    background-color: #2B0E14;
-                    border: 1px solid #EF4444;
-                    border-radius: 9px;
-                    color: #EF4444;
-                    font-size: 9px;
-                    font-weight: 800;
-                    padding: 1px 6px;
-                """)
-                badge.setToolTip("Не удалось скачать аудиофайл")
+            failed_ids = data.get("failed_ids") or []
+            if not failed_ids and data.get("last_failed_id"):
+                failed_ids = [data.get("last_failed_id")]
+            for m_id in failed_ids:
+                if m_id in self._track_status_badges:
+                    badge = self._track_status_badges[m_id]
+                    badge.setText("FAILED")
+                    badge.setStyleSheet("""
+                        background-color: #2B0E14;
+                        border: 1px solid #EF4444;
+                        border-radius: 9px;
+                        color: #EF4444;
+                        font-size: 9px;
+                        font-weight: 800;
+                        padding: 1px 6px;
+                    """)
+                    badge.setToolTip("Не удалось скачать аудиофайл")
 
         # 2. Обновление панели ACTIVE DOWNLOADS справа
         if hasattr(self, "stream_widgets"):
@@ -649,7 +826,33 @@ class DownloadControllerMixin:
             self._update_storage_stats()
 
     def download_finished(self):
+        sender = self.sender() if hasattr(self, "sender") else None
+        curr_th = getattr(self, "download_thread", None)
+        if sender is not None and curr_th is not None and sender is not curr_th:
+            return
+
         self.log("Загрузка завершена.")
+        # Финальный проход: треки, оставшиеся в QUEUED/DOWNLOADING, реально не
+        # были сохранены (успешным проставляется SAVED по ходу выполнения).
+        # Раньше такие треки навсегда залипали в оранжевом состоянии.
+        if hasattr(self, "_track_status_badges"):
+            stale = 0
+            for badge in self._track_status_badges.values():
+                if badge.text().startswith(("QUEUED", "DOWNLOADING")):
+                    badge.setText("FAILED")
+                    badge.setStyleSheet("""
+                        background-color: #2B0E14;
+                        border: 1px solid #EF4444;
+                        border-radius: 9px;
+                        color: #EF4444;
+                        font-size: 9px;
+                        font-weight: 800;
+                        padding: 1px 6px;
+                    """)
+                    badge.setToolTip("Файл не был сохранен")
+                    stale += 1
+            if stale:
+                self.log(f"Не сохранено треков: {stale}")
         if hasattr(self, "show_tray_notification"):
             self.show_tray_notification("BEATSTORM DJ Pool", "Загрузка аудио треков завершена!")
         self.scan_button.setEnabled(True)

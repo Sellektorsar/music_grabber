@@ -45,7 +45,8 @@ def get_db_path(db_path: Optional[str] = None) -> str:
     """Возвращает путь к файлу БД."""
     if db_path:
         return db_path
-    return getattr(config, "DB_FILE", os.path.join("telegram_audio", "downloads.db"))
+    return getattr(config, "DB_FILE",
+                   os.path.join(config.BASE_PATH, "downloads.db"))
 
 
 def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:

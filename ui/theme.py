@@ -193,17 +193,17 @@ QCheckBox {
     font-size: 12px;
     spacing: 6px;
 }
-QCheckBox::indicator {
+QCheckBox::indicator, QTreeWidget::indicator, QTableWidget::indicator {
     width: 14px;
     height: 14px;
     border-radius: 3px;
     border: 1px solid #233045;
     background-color: #0F1420;
 }
-QCheckBox::indicator:hover {
+QCheckBox::indicator:hover, QTreeWidget::indicator:hover, QTableWidget::indicator:hover {
     border-color: #00D2BE;
 }
-QCheckBox::indicator:checked {
+QCheckBox::indicator:checked, QTreeWidget::indicator:checked, QTableWidget::indicator:checked {
     background-color: #00D2BE;
     border-color: #00D2BE;
     image: url("");

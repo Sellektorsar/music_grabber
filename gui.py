@@ -21,9 +21,10 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
 )
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QKeySequence, QShortcut
 
 from downloader import DownloadThread
-from config import load_config, save_config
+from config import BASE_PATH, load_config, save_config
 import database as db_module
 from ui.tray import setup_system_tray, show_tray_notification
 
@@ -194,6 +195,28 @@ class MainWindow(
         self._tray_minimized_notified = False
         self._init_background_watcher()
         setup_system_tray(self)
+
+        # QTreeWidget перехватывает «X» под свой type-ahead поиск, поэтому
+        # горячая клавиша выбора трека не доходила до keyPressEvent окна.
+        # Фильтр событий возвращает управление клавише X в окно.
+        tree = getattr(self, "library_tree", None)
+        if tree is not None:
+            tree.installEventFilter(self)
+            tree.viewport().installEventFilter(self)
+
+        # keyPressEvent окна не срабатывает, когда фокус удерживает дочерний
+        # виджет: QPushButton и подобные поглощают буквенные клавиши, и до окна
+        # событие не доходит. QShortcut срабатывает на уровне окна всегда,
+        # поэтому горячие клавиши очистки поиска и загрузки вешаются на него.
+        self._dj_shortcuts = []
+        for seq, slot in (
+            ("Shift+C", self._dj_clear_search),
+            ("Shift+D", self._dj_start_download),
+        ):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(slot)
+            self._dj_shortcuts.append(sc)
 
         # Автоматическое сканирование сохраненных каналов при запуске приложения (по умолчанию выключено)
         cfg = load_config()
@@ -376,7 +399,7 @@ class MainWindow(
 
     def closeEvent(self, event):
         cfg = load_config()
-        minimize_to_tray = cfg.get("minimize_to_tray", True)
+        minimize_to_tray = cfg.get("minimize_to_tray", False)
         if (
             not getattr(self, "_force_close", False)
             and minimize_to_tray
@@ -401,6 +424,11 @@ class MainWindow(
         """Очистка ресурсов при завершении работы приложения."""
         if hasattr(self, "_watcher_timer") and self._watcher_timer.isActive():
             self._watcher_timer.stop()
+        if hasattr(self, "player_bar") and self.player_bar:
+            try:
+                self.player_bar.stop_playback()
+            except Exception:
+                pass
         if hasattr(self, "_player") and self._player:
             try:
                 self._player.stop()
@@ -525,37 +553,44 @@ class MainWindow(
         a_item = self.home_recent_table.item(row, 1)
         if not t_item:
             return
-        filepath = t_item.data(Qt.ItemDataRole.UserRole)
-        artist = a_item.text() if a_item else ""
-        title_text = t_item.text() if t_item else ""
-        title = f"{artist} - {title_text}".strip(" -")
-        if filepath and os.path.exists(filepath):
-            self.player_bar.setVisible(True)
-            self.play_audio_file(filepath, title=title)
-            self.log(f"▶ Воспроизведение: {title}")
+        user_data = t_item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(user_data, dict):
+            self.play_or_preview_track(user_data)
         else:
-            self.log(f"⚠️ Аудиофайл не найден на диске: {filepath or title}")
+            filepath = str(user_data) if user_data else ""
+            artist = a_item.text() if a_item else ""
+            title_text = t_item.text() if t_item else ""
+            title = f"{artist} - {title_text}".strip(" -")
+            if filepath and os.path.exists(filepath):
+                self.player_bar.setVisible(True)
+                self.play_audio_file(filepath, title=title)
+                self.log(f"▶ Воспроизведение: {title}")
+            else:
+                self.log(f"⚠️ Аудиофайл не найден на диске: {filepath or title}")
 
     def play_or_preview_track(self, track):
         """Воспроизводит локальный файл или инициирует потоковое предпрослушивание чанков."""
-        filepath = track.get("filepath", "")
-        title = f"{track.get('performer', '')} - {track.get('title', '')}".strip(" -")
-        msg_id = track.get("id")
-        chan = track.get("channel") or self.channel_input.text().strip()
+        filepath = track.get("filepath") or track.get("file_path") or ""
+        title = f"{track.get('performer') or track.get('artist', '')} - {track.get('title', '')}".strip(" -")
+        msg_id = track.get("id") or track.get("message_id")
+        chan = track.get("channel") or track.get("channel_id") or (self.channel_input.text().strip() if hasattr(self, "channel_input") else "")
 
         # 1. Если файл уже полностью сохранен на диске
-        if filepath and os.path.exists(filepath):
+        if filepath and os.path.isfile(filepath):
             self.player_bar.setVisible(True)
             self.play_audio_file(filepath, title=title)
             self.log(f"▶ Воспроизведение: {title}")
             return
 
         # 2. Если уже есть скачанное превью в кэше
-        preview_dir = os.path.join(getattr(self, "base_folder", "telegram_audio"), "previews")
-        if os.path.exists(preview_dir):
+        # Каталог кэша обязан совпадать с recorder.py (там: BASE_PATH + "previews"),
+        # иначе при запуске из dist/ относительный путь не найдёт кэш.
+        base = getattr(self, "base_folder", None) or BASE_PATH
+        preview_dir = os.path.join(base, "previews")
+        if msg_id and os.path.exists(preview_dir):
             for ext in (".mp3", ".m4a", ".ogg", ".flac", ".wav"):
                 cand = os.path.join(preview_dir, f"preview_{msg_id}{ext}")
-                if os.path.exists(cand) and os.path.getsize(cand) >= 32 * 1024:
+                if os.path.isfile(cand) and os.path.getsize(cand) >= 32 * 1024:
                     self.player_bar.setVisible(True)
                     self.play_audio_file(cand, title=f"⚡ [PREVIEW] {title}")
                     self.log(f"🎧 Воспроизведение из кэша превью: {title}")
@@ -576,10 +611,15 @@ class MainWindow(
                 return
 
         # 4. Запускаем потоковую буферизацию превью через DownloadThread
-        self.player_bar.setVisible(True)
-        self.player_title_label.setText(f"⚡ Буферизация превью: {title}...")
-        self.log(f"⚡ Запрос потокового предпрослушивания для «{title}»...")
-        self.start_preview_stream(chan, msg_id, title)
+        if msg_id:
+            self.player_bar.setVisible(True)
+            self.player_title_label.setText(f"⚡ Буферизация превью: {title}...")
+            self.log(f"⚡ Запрос потокового предпрослушивания для «{title}»...")
+            self.start_preview_stream(chan, msg_id, title)
+        else:
+            self.player_bar.setVisible(True)
+            self.player_title_label.setText(f"⏳ Файл ещё не скачан: {title}")
+            self.log(f"Файл ещё не скачан: {title}")
 
     def start_preview_stream(self, channel, track_id, title=""):
         """Запускает фоновый поток буферизации превью через DownloadThread."""
@@ -590,6 +630,22 @@ class MainWindow(
             return
         api_id, api_hash, default_ch, mode, date_from, date_to = params
         target_channel = channel or default_ch
+
+        th = getattr(self, "download_thread", None)
+        if th is not None and getattr(th, "isRunning", lambda: False)():
+            self.log("⚠️ Предыдущая операция ещё выполняется. Дождитесь завершения или нажмите «Стоп».")
+            return
+
+        old_th = getattr(self, "download_thread", None)
+        if old_th is not None:
+            _LINGERING_THREADS.add(old_th)
+            try:
+                finished_sig = getattr(old_th, "finished", None)
+                if finished_sig and hasattr(finished_sig, "connect"):
+                    finished_sig.connect(lambda t=old_th: _LINGERING_THREADS.discard(t))
+            except Exception:
+                pass
+            self.download_thread = None
 
         proxy_cfg = self._get_proxy_config() if hasattr(self, "_get_proxy_config") else getattr(self, "_proxy_config", None)
         self.download_thread = DownloadThread(
@@ -611,6 +667,8 @@ class MainWindow(
 
     def _on_preview_ready(self, track_id, preview_path):
         """Вызывается при получении первых чанков потокового превью."""
+        if not preview_path:
+            return
         scan_tracks = getattr(self, "_scan_results", []) or []
         track = next((t for t in scan_tracks if t.get("id") == track_id), None)
         title = (
@@ -623,8 +681,59 @@ class MainWindow(
 
     def _on_preview_finished(self):
         """Очистка ссылки на поток после завершения буферизации превью."""
+        sender = self.sender() if hasattr(self, "sender") else None
+        curr_th = getattr(self, "download_thread", None)
+        if sender is not None and curr_th is not None and sender is not curr_th:
+            return
         if self.download_thread and getattr(self.download_thread, "preview_track_id", None):
+            old_th = self.download_thread
+            _LINGERING_THREADS.add(old_th)
+            try:
+                finished_sig = getattr(old_th, "finished", None)
+                if finished_sig and hasattr(finished_sig, "connect"):
+                    finished_sig.connect(lambda t=old_th: _LINGERING_THREADS.discard(t))
+            except Exception:
+                pass
             self.download_thread = None
+
+    def _dj_text_input_focused(self):
+        """True, если фокус в поле ввода — тогда горячие клавиши не применяются."""
+        from PyQt6.QtWidgets import (
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+            QSpinBox,
+            QDoubleSpinBox,
+            QComboBox,
+        )
+
+        return isinstance(
+            self.focusWidget(),
+            (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox),
+        )
+
+    def _dj_clear_search(self):
+        """Shift+C — сброс поиска по всем полям и снятие фильтра."""
+        if self._dj_text_input_focused():
+            return
+        for attr in (
+            "top_search_input",
+            "search_filter_input",
+            "channel_search_input",
+            "home_search_input",
+        ):
+            field = getattr(self, attr, None)
+            if field is not None and hasattr(field, "clear"):
+                field.clear()
+        if hasattr(self, "_filter_tracks_text"):
+            self._filter_tracks_text("")
+
+    def _dj_start_download(self):
+        """Shift+D — запуск загрузки отмеченных треков."""
+        if self._dj_text_input_focused():
+            return
+        if hasattr(self, "start_download"):
+            self.start_download()
 
     def keyPressEvent(self, event):
         """DJ Hotkeys: Space (Play/Pause), X/Enter (Toggle check), Arrows (Seek +-10s), Shift+D (Download), Shift+C (Clear search)."""
@@ -652,19 +761,11 @@ class MainWindow(
 
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             if key == Qt.Key.Key_D:
-                if hasattr(self, "start_download"):
-                    self.start_download()
-                    event.accept()
-                    return
+                self._dj_start_download()
+                event.accept()
+                return
             elif key == Qt.Key.Key_C:
-                if hasattr(self, "top_search_input"):
-                    self.top_search_input.clear()
-                if hasattr(self, "search_filter_input"):
-                    self.search_filter_input.clear()
-                if hasattr(self, "channel_search_input"):
-                    self.channel_search_input.clear()
-                if hasattr(self, "_filter_tracks_text"):
-                    self._filter_tracks_text("")
+                self._dj_clear_search()
                 event.accept()
                 return
 
@@ -695,6 +796,11 @@ class MainWindow(
             return
 
         if key in (Qt.Key.Key_X, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            # Shift+X не переключает чекбокс: заглавная «X» нужна для
+            # перехода по первой букве, как и в eventFilter ниже.
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)
+                return
             cur_item = (
                 self.library_tree.currentItem()
                 if hasattr(self, "library_tree")
@@ -706,4 +812,37 @@ class MainWindow(
                 return
 
         super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        """Перехватывает DJ-горячие клавиши, когда фокус в дереве библиотеки.
+
+        keyPressEvent окна не срабатывает: QTreeWidget обрабатывает буквенные
+        клавиши сам (переход к элементу по первой букве) и событие до окна
+        не доходит. Здесь «X»/Enter переключают чекбокс выделенного трека,
+        Space — запускает воспроизведение.
+        """
+        from PyQt6.QtCore import QEvent
+
+        tree = getattr(self, "library_tree", None)
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and tree is not None
+            and obj in (tree, tree.viewport())
+        ):
+            if event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+            ):
+                return False
+            key = event.key()
+            cur_item = tree.currentItem()
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if key in (Qt.Key.Key_X, Qt.Key.Key_Return, Qt.Key.Key_Enter) and not shift:
+                if cur_item is not None and hasattr(self, "toggle_item_check_state"):
+                    self.toggle_item_check_state(cur_item)
+                    return True
+            elif key == Qt.Key.Key_Space and cur_item is not None:
+                if hasattr(self, "_on_tree_item_double_clicked"):
+                    self._on_tree_item_double_clicked(cur_item, 0)
+                    return True
+        return super().eventFilter(obj, event)
 

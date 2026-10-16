@@ -451,14 +451,16 @@ class TreeControllerMixin:
                             if ch_key.strip().lower() != f_ch:
                                 track_item.setHidden(True)
                         query = ""
-                        if hasattr(self, "top_search_input"):
-                            query = self.top_search_input.text().strip().lower()
-                        elif hasattr(self, "search_filter_input"):
+                        if hasattr(self, "search_filter_input") and self.search_filter_input.text().strip():
                             query = self.search_filter_input.text().strip().lower()
+                        elif hasattr(self, "top_search_input") and self.top_search_input.text().strip():
+                            query = self.top_search_input.text().strip().lower()
                         if query:
                             title = track_item.text(1).lower()
                             artist = track_item.text(2).lower()
-                            if query not in f"{artist} {title}":
+                            fname = str(t.get("filename", "")).lower()
+                            haystack = f"{artist} {title} {fname}"
+                            if not all(part in haystack for part in query.split()):
                                 track_item.setHidden(True)
 
                     self._chan_track_counts[(d_key, ch_key)] += len(ch_tracks)
@@ -544,7 +546,19 @@ class TreeControllerMixin:
             for i in range(self.track_list.count())
             if self.track_list.item(i).checkState() == Qt.CheckState.Checked
         )
-        if selected_count > 0:
+        if hasattr(self, "home_recent_table") and self.home_recent_table:
+            for r in range(self.home_recent_table.rowCount()):
+                t_it = self.home_recent_table.item(r, 0)
+                if t_it and t_it.checkState() == Qt.CheckState.Checked:
+                    t_data = t_it.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(t_data, dict):
+                        mid = t_data.get("id") or t_data.get("message_id")
+                        if not hasattr(self, "_track_list_item_by_id") or mid not in self._track_list_item_by_id:
+                            selected_count += 1
+
+        has_selected = selected_count > 0
+        self.download_button.setEnabled(has_selected)
+        if has_selected:
             self.download_button.setText(f"⚡ Скачать выбранное ({selected_count})")
             if getattr(self, "btn_lib_download", None):
                 self.btn_lib_download.setText(f"⬇ Download ({selected_count})")
@@ -552,6 +566,13 @@ class TreeControllerMixin:
             self.download_button.setText("Скачать выбранное")
             if getattr(self, "btn_lib_download", None):
                 self.btn_lib_download.setText("⬇ Download All")
+
+        if hasattr(self, "bento_btn_download") and self.bento_btn_download:
+            self.bento_btn_download.setEnabled(has_selected)
+            if has_selected:
+                self.bento_btn_download.setText(f"📥 Скачать ({selected_count})")
+            else:
+                self.bento_btn_download.setText("📥 Скачать")
 
     def _expand_all_groups(self):
         if hasattr(self, "library_tree"):
@@ -750,7 +771,11 @@ class TreeControllerMixin:
         if query:
             artist = str(t_data.get("performer", "")).lower()
             title = str(t_data.get("title", "")).lower()
-            if query not in f"{artist} {title}":
+            filename = str(t_data.get("filename", "")).lower()
+            raw_p = str(t_data.get("raw_performer", "")).lower()
+            raw_t = str(t_data.get("raw_title", "")).lower()
+            haystack = f"{artist} {title} {filename} {raw_p} {raw_t}"
+            if not all(part in haystack for part in query.split()):
                 return False
 
         # 2. Фильтр по каналу
@@ -1038,10 +1063,10 @@ class TreeControllerMixin:
             return None
 
         if not target_filepath:
-            from config import BASE_FOLDER
+            from config import BASE_PATH
             today = datetime.now().strftime("%Y-%m-%d")
             chan = self.channel_input.text().strip().lstrip("@") or "tracks"
-            default_name = os.path.join(BASE_FOLDER, f"{chan}_{today}.m3u8")
+            default_name = os.path.join(BASE_PATH, f"{chan}_{today}.m3u8")
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Сохранить M3U8 плейлист",

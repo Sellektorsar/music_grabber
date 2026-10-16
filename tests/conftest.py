@@ -19,6 +19,7 @@ def _make_async_client(*args, **kwargs):
     client.iter_messages = MagicMock()
     client.disconnect = AsyncMock()
     client.is_connected = MagicMock(return_value=False)
+    del client.get_messages
     return client
 
 
@@ -65,9 +66,44 @@ def _get_doc_attr(duration=30, performer='TestArtist', title='TestTitle'):
 
 @pytest.fixture(autouse=True)
 def isolate_base_folder(monkeypatch, tmp_path):
-    monkeypatch.setattr(rec_module, 'BASE_FOLDER', str(tmp_path / "telegram_audio"))
-    monkeypatch.setattr(cfg_module, 'DB_FILE', str(tmp_path / "telegram_audio" / "downloads.db"))
-    monkeypatch.setattr(cfg_module, 'CONFIG_FILE', str(tmp_path / "telegram_audio" / "config.json"))
+    """Подменяет все пути, по которым пишет приложение.
+
+    Кроме BASE_FOLDER модули тянут ещё и BASE_PATH -- через
+    ``from config import BASE_PATH`` он фиксируется в момент импорта, и
+    обычная подмена config.BASE_PATH на них не действует. Без этой
+    подмены тесты, сохраняющие список каналов, писали настоящий
+    telegram_audio/channels.json пользователя (DEFECT-025).
+    """
+    base = tmp_path / "telegram_audio"
+    monkeypatch.setattr(rec_module, 'BASE_FOLDER', str(base))
+    monkeypatch.setattr(cfg_module, 'BASE_PATH', str(base))
+    monkeypatch.setattr(cfg_module, 'DB_FILE', str(base / "downloads.db"))
+    monkeypatch.setattr(cfg_module, 'CONFIG_FILE', str(base / "config.json"))
+
+    for module_path in ("gui", "ui.views",
+                        "ui.controllers.channels_controller",
+                        "ui.controllers.download_controller",
+                        "ui.controllers.tree_controller"):
+        module = sys.modules.get(module_path)
+        if module is not None and hasattr(module, "BASE_PATH"):
+            monkeypatch.setattr(module, "BASE_PATH", str(base))
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def isolate_session_file(monkeypatch, tmp_path):
+    """Ни один тест не должен открывать настоящий файл сессии Telegram.
+
+    downloader._create_client подключается к файлу сессии и выставляет
+    PRAGMA journal_mode=WAL. Тест, вызывающий этот код, без подмены пути
+    писал в рабочий session.session -- и портил его, если приложение уже
+    запущено или только что было закрыто. Авторизация Telegram при этом
+    терялась до перезапуска, а восстановление возможно только из резервной
+    копии.
+    """
+    monkeypatch.setattr(
+        cfg_module, 'get_session_path', lambda: str(tmp_path / "session")
+    )
     return tmp_path
 
 
@@ -82,6 +118,7 @@ def mock_client():
     client.sign_in = AsyncMock()
     client.get_me = AsyncMock()
     client.disconnect = AsyncMock()
+    del client.get_messages
     return client
 
 

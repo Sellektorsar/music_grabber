@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from config import load_config, save_config
+from config import BASE_PATH, DEFAULT_CONFIG, load_config, save_config
 import database as db_module
 from ui.theme import DARK_STYLESHEET
 from ui.dialogs import InputCodeDialog
@@ -42,9 +42,20 @@ DEFAULT_CHANNELS = [
 ]
 
 
+def _channels_file() -> str:
+    """Путь к списку каналов.
+
+    Берётся от BASE_PATH, а не от текущего рабочего каталога: при запуске
+    из ярлыка рабочим каталогом оказывается System32, и список каналов
+    молча сбрасывался бы на значения по умолчанию, а правки сохранялись
+    в посторонней папке.
+    """
+    return os.path.join(BASE_PATH, "channels.json")
+
+
 def load_saved_channels() -> list[str]:
     import json
-    ch_file = os.path.join("telegram_audio", "channels.json")
+    ch_file = _channels_file()
     if os.path.exists(ch_file):
         try:
             with open(ch_file, "r", encoding="utf-8") as f:
@@ -58,9 +69,9 @@ def load_saved_channels() -> list[str]:
 
 def save_saved_channels(channels: list[str]) -> None:
     import json
-    ch_file = os.path.join("telegram_audio", "channels.json")
+    ch_file = _channels_file()
     try:
-        os.makedirs("telegram_audio", exist_ok=True)
+        os.makedirs(BASE_PATH, exist_ok=True)
         with open(ch_file, "w", encoding="utf-8") as f:
             json.dump(channels, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -183,6 +194,15 @@ class ChannelsMixin:
             save_saved_channels(self._saved_channels)
             self._populate_saved_channels()
             self.log(f"Канал {chan_name} удален из сохраненных.")
+            # Активный канал не должен оставаться ссылкой на удалённый канал:
+            # иначе поле канала хранит несуществующее имя, статус в таблице
+            # Channels у остальных каналов становится «В пуле», а интерфейс
+            # расходится с config.json, который этот канал не меняет.
+            if (
+                hasattr(self, "channel_input")
+                and self.channel_input.text().strip().lower() == str(chan_name).lower()
+            ):
+                self.channel_input.clear()
             if hasattr(self, "channels_view"):
                 self._refresh_channels_view()
 
@@ -264,23 +284,6 @@ class ChannelsMixin:
         from ui.views import create_channels_view
         return create_channels_view(self)
 
-    def _add_channel_from_home(self):
-        text = self.home_add_chan_input.text().strip()
-        if not text:
-            return
-        if not text.startswith("@") and not text.startswith("http"):
-            text = f"@{text}"
-        if not hasattr(self, "_saved_channels"):
-            self._saved_channels = []
-        if text not in self._saved_channels:
-            self._saved_channels.append(text)
-            save_saved_channels(self._saved_channels)
-            self._populate_saved_channels()
-            self._refresh_home_view()
-            self.channel_input.setText(text)
-            self.home_add_chan_input.clear()
-            self.log(f"Канал {text} успешно добавлен в пул.")
-
     def _add_channel_from_manager(self):
         text = self.chan_view_input.text().strip()
         if not text:
@@ -314,7 +317,9 @@ class ChannelsMixin:
 
         if hasattr(self, "home_disk_val"):
             try:
-                total, used, free = shutil.disk_usage("telegram_audio")
+                # Тот же BASE_PATH, что и в _update_storage_stats: относительный
+                # путь разрешался бы от рабочего каталога процесса.
+                total, used, free = shutil.disk_usage(BASE_PATH)
                 free_gb = free / (1024 ** 3)
                 self.home_disk_val.setText(f"{free_gb:.1f} GB свободно")
             except Exception as e:
@@ -327,6 +332,7 @@ class ChannelsMixin:
                     records = self._scan_results[:100]
                 else:
                     records = db_module.get_downloads(limit=25)
+                self.home_recent_table.blockSignals(True)
                 self.home_recent_table.setRowCount(len(records))
                 for row_idx, r in enumerate(records):
                     tit = r.get("title") or r.get("raw_title") or "—"
@@ -337,6 +343,16 @@ class ChannelsMixin:
 
                     t_item = QTableWidgetItem(tit)
                     t_item.setData(Qt.ItemDataRole.UserRole, r)
+                    mid = r.get("id") or r.get("message_id")
+                    if mid and hasattr(self, "_track_list_item_by_id"):
+                        l_item = self._track_list_item_by_id.get(mid)
+                        if l_item:
+                            t_item.setCheckState(l_item.checkState())
+                        else:
+                            t_item.setCheckState(Qt.CheckState.Unchecked)
+                    elif mid:
+                        t_item.setCheckState(Qt.CheckState.Unchecked)
+
                     a_item = QTableWidgetItem(perf)
                     c_item = QTableWidgetItem(chan)
                     f_item = QTableWidgetItem(fname)
@@ -346,6 +362,7 @@ class ChannelsMixin:
                     self.home_recent_table.setItem(row_idx, 1, a_item)
                     self.home_recent_table.setItem(row_idx, 2, c_item)
                     self.home_recent_table.setItem(row_idx, 3, f_item)
+                self.home_recent_table.blockSignals(False)
             except Exception as e:
                 logger.debug(f"Ошибка загрузки недавних треков: {e}")
 
@@ -439,25 +456,6 @@ class ChannelsMixin:
         if reply == QMessageBox.StandardButton.Yes:
             self._remove_saved_channel(chan)
 
-    def _on_recent_table_double_clicked(self, item):
-        """Воспроизведение трека по двойному клику в таблице Bento Studio."""
-        row = item.row()
-        t_item = self.home_recent_table.item(row, 0)
-        if not t_item:
-            return
-        track_data = t_item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(track_data, dict):
-            if hasattr(self, "play_or_preview_track"):
-                self.play_or_preview_track(track_data)
-            else:
-                fpath = track_data.get("filepath") or track_data.get("file_path")
-                if fpath and os.path.exists(fpath):
-                    self.play_audio_file(fpath, title=track_data.get("title", ""))
-        elif isinstance(track_data, str) and os.path.exists(track_data):
-            self.play_audio_file(track_data, title=t_item.text())
-        elif isinstance(track_data, str):
-            self.log(f"Файл не найден на диске: {track_data}")
-
     def _on_recent_table_item_clicked(self, item):
         """Отображение выбранного трека в TrackInspectorCard."""
         row = item.row()
@@ -474,14 +472,40 @@ class ChannelsMixin:
                 "file_path": track_data,
             })
 
+    def _on_recent_table_item_changed(self, item):
+        """Синхронизирует выбор чекбокса из таблицы Bento Studio с деревом и списком треков."""
+        if not item or item.column() != 0:
+            return
+        track_data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(track_data, dict):
+            return
+        mid = track_data.get("id") or track_data.get("message_id")
+        if not mid:
+            return
+        state = item.checkState()
+        if hasattr(self, "_track_list_item_by_id") and mid in self._track_list_item_by_id:
+            l_item = self._track_list_item_by_id[mid]
+            if l_item.checkState() != state:
+                l_item.setCheckState(state)
+        if hasattr(self, "_track_item_by_id") and mid in self._track_item_by_id:
+            tr_item = self._track_item_by_id[mid]
+            if tr_item.checkState(0) != state:
+                tr_item.setCheckState(0, state)
+        if hasattr(self, "_update_download_button_counter"):
+            self._update_download_button_counter()
+
     def _load_settings(self):
         cfg = load_config()
         if cfg.get("api_id"):
-            self.api_id_input.setText(cfg["api_id"])
+            # Приведение к строке обязательно: в config.json поле могло
+            # оказаться числом (правка руками, перенос из другого конфига),
+            # и QLineEdit.setText на числе падал с TypeError прямо в
+            # конструкторе -- приложение не запускалось вовсе.
+            self.api_id_input.setText(str(cfg["api_id"]))
         if cfg.get("api_hash"):
-            self.api_hash_input.setText(cfg["api_hash"])
+            self.api_hash_input.setText(str(cfg["api_hash"]))
         if cfg.get("channel"):
-            self.channel_input.setText(cfg["channel"])
+            self.channel_input.setText(str(cfg["channel"]))
         mode = cfg.get("mode", "direct")
         idx = self.mode_combo.findData(mode)
         if idx >= 0:
@@ -493,20 +517,26 @@ class ChannelsMixin:
 
         if cfg.get("max_concurrent_downloads"):
             try:
+                self.threads_spin.blockSignals(True)
                 self.threads_spin.setValue(int(cfg["max_concurrent_downloads"]))
             except (ValueError, TypeError):
                 pass
+            finally:
+                self.threads_spin.blockSignals(False)
         if cfg.get("mp3_bitrate"):
             idx_b = self.bitrate_combo.findText(cfg["mp3_bitrate"])
             if idx_b >= 0:
+                self.bitrate_combo.blockSignals(True)
                 self.bitrate_combo.setCurrentIndex(idx_b)
+                self.bitrate_combo.blockSignals(False)
 
         if hasattr(self, "export_pattern_input"):
             self.export_pattern_input.setText(cfg.get("export_pattern", "{channel}/{artist} - {title}.mp3"))
         if hasattr(self, "auto_m3u8_check"):
             self.auto_m3u8_check.setChecked(bool(cfg.get("auto_generate_m3u8", False)))
         if hasattr(self, "embed_id3_check"):
-            self.embed_id3_check.setChecked(bool(cfg.get("embed_id3_tags", True)))
+            self.embed_id3_check.setChecked(
+            bool(cfg.get("embed_id3_tags", DEFAULT_CONFIG["embed_id3_tags"])))
         if hasattr(self, "watcher_interval_spin"):
             self.watcher_interval_spin.setValue(int(cfg.get("auto_watcher_interval_minutes", 15)))
 
@@ -620,14 +650,18 @@ class ChannelsMixin:
         if hasattr(self, "save_feedback_lbl"):
             self.save_feedback_lbl.setText("✓ Автосохранено")
             QTimer.singleShot(2000, lambda: self.save_feedback_lbl.setText(""))
-        self.log(
-            f"Параметр обновлен и сохранен: Качество={self.bitrate_combo.currentText()}, "
-            f"Потоков={self.threads_spin.value()}"
-        )
+        # Сообщение не упоминает качество и потоки: сигнал приходит и от
+        # полей канала и дат, и от кнопок пресетов, и называть там «Качество»
+        # было бы прямой неправдой.
+        self.log("Настройка обновлена и сохранена.")
 
     def _update_storage_stats(self):
         try:
-            target_dir = os.path.abspath("telegram_audio")
+            # Путь берётся от BASE_PATH, а не от текущего рабочего каталога:
+            # при запуске из ярлыка с чужим «рабочим каталогом» относительный
+            # путь создавал лишнюю папку telegram_audio и считал свободное
+            # место не на том диске. Тот же класс, что был DEFECT-013.
+            target_dir = os.path.join(BASE_PATH)
             os.makedirs(target_dir, exist_ok=True)
             total_b, used_b, free_b = shutil.disk_usage(target_dir)
             free_gb = free_b / (1024 ** 3)

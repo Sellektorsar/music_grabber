@@ -100,6 +100,7 @@ class TestDefaults:
             'export_pattern', 'auto_generate_m3u8', 'playlist_filename',
             'minimize_to_tray', 'tray_notifications',
             'auto_watcher_enabled', 'auto_watcher_interval_minutes',
+            'embed_id3_tags',
         }
         assert set(cfg.DEFAULT_CONFIG.keys()) == required
         assert cfg.DEFAULT_CONFIG['mode'] == 'direct'

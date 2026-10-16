@@ -37,11 +37,13 @@ def setup_library_panel(window) -> QFrame:
     window.btn_lib_filter.setObjectName("chipButton")
     window.btn_lib_filter.setToolTip("Показать или скрыть панель быстрого поиска и фильтров")
     window.btn_lib_filter.clicked.connect(window._toggle_filter_bar)
+    window.filter_btn = window.btn_lib_filter
 
     window.btn_lib_sync = QPushButton("🔄 Sync")
     window.btn_lib_sync.setObjectName("chipButton")
     window.btn_lib_sync.setToolTip("Повторно просканировать канал и обновить список")
     window.btn_lib_sync.clicked.connect(window.start_scan)
+    window.sync_btn = window.btn_lib_sync
 
     window.btn_lib_download = None  # Исключаем дублирующую кнопку
 
@@ -86,8 +88,18 @@ def setup_library_panel(window) -> QFrame:
     window.btn_select_none.clicked.connect(window._clear_selection)
 
     window.search_filter_input = QLineEdit()
-    window.search_filter_input.setPlaceholderText("🔍 Поиск по названию или исполнителю...")
+    window.search_filter_input.setPlaceholderText("🔍 Поиск в списке (Enter — искать по всему каналу)...")
+    window.search_filter_input.setClearButtonEnabled(True)
     window.search_filter_input.textChanged.connect(window._filter_tracks_text)
+    if hasattr(window, "_search_channel_history"):
+        window.search_filter_input.returnPressed.connect(window._search_channel_history)
+    window.search_input = window.search_filter_input
+
+    window.btn_search_channel = QPushButton("🔍 В канале")
+    window.btn_search_channel.setObjectName("chipButton")
+    window.btn_search_channel.setToolTip("Глобальный поиск по всей истории Telegram-канала через MTProto")
+    if hasattr(window, "_search_channel_history"):
+        window.btn_search_channel.clicked.connect(window._search_channel_history)
 
     window.stats_label = QLabel("")
     window.stats_label.setStyleSheet("color: #00E5FF; font-weight: 700; font-size: 11px;")
@@ -98,6 +110,7 @@ def setup_library_panel(window) -> QFrame:
     row1_layout.addWidget(window.btn_select_all)
     row1_layout.addWidget(window.btn_select_none)
     row1_layout.addWidget(window.search_filter_input, 1)
+    row1_layout.addWidget(window.btn_search_channel)
     row1_layout.addWidget(window.stats_label)
     batch_container_layout.addLayout(row1_layout)
 
@@ -179,27 +192,32 @@ def setup_library_panel(window) -> QFrame:
     window.library_tree = QTreeWidget()
     window.library_tree.setColumnCount(8)
     window.library_tree.setHeaderLabels(
-        ["", "TITLE  ▲", "ARTIST", "BPM / KEY", "DUR.", "CHANNEL", "STATUS", "WAVEFORM"]
+        ["☑", "TITLE  ▲", "ARTIST", "BPM / KEY", "DUR.", "CHANNEL", "STATUS", "WAVEFORM"]
     )
     window.library_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-    window.library_tree.setColumnWidth(0, 40)
-    window.library_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+    window.library_tree.setColumnWidth(0, 46)
+    # TITLE, ARTIST, CHANNEL и WAVEFORM тянутся, а не держат заданную
+    # ширину. Раньше они были Interactive, и при узком окне сумма колонок
+    # превышала доступную ширину: CHANNEL, STATUS и WAVEFORM уезжали за
+    # край, а STATUS -- основная обратная связь (READY/SAVED/FAILED) --
+    # становился недоступен без горизонтальной прокрутки.
+    window.library_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
     window.library_tree.setColumnWidth(1, 180)
-    window.library_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+    window.library_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
     window.library_tree.setColumnWidth(2, 120)
     window.library_tree.header().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-    window.library_tree.setColumnWidth(3, 80)
+    window.library_tree.setColumnWidth(3, 76)
     window.library_tree.header().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-    window.library_tree.setColumnWidth(4, 52)
-    window.library_tree.header().setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+    window.library_tree.setColumnWidth(4, 50)
+    window.library_tree.header().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
     window.library_tree.setColumnWidth(5, 120)
     window.library_tree.header().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-    window.library_tree.setColumnWidth(6, 96)
+    window.library_tree.setColumnWidth(6, 92)
     window.library_tree.header().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
     window.library_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     window.library_tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     window.library_tree.setAnimated(True)
-    window.library_tree.setIndentation(16)
+    window.library_tree.setIndentation(12)
     window.library_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     if hasattr(window, "_show_tree_context_menu"):
         window.library_tree.customContextMenuRequested.connect(window._show_tree_context_menu)

@@ -54,6 +54,7 @@ class MockDownloadThread(QObject):
         self.channels = kwargs.get("channels", [channel] if channel else [])
         self.limit_per_channel = kwargs.get("limit_per_channel")
         self.channel_offsets = kwargs.get("channel_offsets", {})
+        self.search_query = kwargs.get("search_query")
         self.selected_ids = set(selected_ids or [])
         self._cancel_requested = False
         self.started = False
@@ -590,7 +591,9 @@ class TestInputCodeDialog:
         qtbot.addWidget(dlg)
         assert dlg.label.text() == "Enter code:"
         assert dlg.input.text() == ""
-        assert dlg.windowTitle() == "Ввод данных"
+        # Заголовок берётся из запроса (DEFECT-024), а не всегда
+        # «Ввод данных»: в списке окон было невозможно понять, что просят.
+        assert dlg.windowTitle() == "Enter code"
 
     def test_accept_with_text_emits_signal(self, qtbot):
         from gui import InputCodeDialog
@@ -1298,6 +1301,42 @@ class TestBentoStudioRecentTablePlayback:
         assert id(window.player_bar) == p_bar_id
         assert id(window.player_bar._player) == p_obj_id
         assert window.player_bar._current_audio_path == str(f1)
+        window.player_bar.stop_playback()
+
+
+class TestChannelSearchFeature:
+    def test_search_channel_history_starts_scan_with_query(self, window):
+        window.api_id_input.setText("12345")
+        window.api_hash_input.setText("hash_123")
+        window.channel_input.setText("@TestChannel")
+
+        window._search_channel_history("Daft Punk")
+
+        assert window.download_thread is not None
+        assert window.download_thread.scan_only is True
+        assert window.download_thread.search_query == "Daft Punk"
+        assert window._current_search_query == "Daft Punk"
+
+    def test_search_channel_history_reads_from_inputs(self, window):
+        window.api_id_input.setText("12345")
+        window.api_hash_input.setText("hash_123")
+        window.channel_input.setText("@TestChannel")
+        window.search_filter_input.setText("Armin")
+
+        window._search_channel_history()
+
+        assert window.download_thread is not None
+        assert window.download_thread.search_query == "Armin"
+        assert window.top_search_input.text() == "Armin"
+        assert window.home_search_input.text() == "Armin"
+
+    def test_library_btn_search_channel_exists(self, window):
+        assert hasattr(window, "btn_search_channel")
+        assert window.btn_search_channel.text() == "🔍 В канале"
+
+    def test_bento_btn_search_channel_exists(self, window):
+        assert hasattr(window, "home_btn_search_channel")
+        assert window.home_btn_search_channel.text() == "🔍 В канале"
 
 
 

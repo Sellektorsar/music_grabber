@@ -83,7 +83,8 @@ def setup_deck_header(window) -> QFrame:
     right_nav_layout.setSpacing(10)
 
     window.top_search_input = QLineEdit()
-    window.top_search_input.setPlaceholderText("🔍 Search")
+    window.top_search_input.setPlaceholderText("🔍 Search (Enter)")
+    window.top_search_input.setClearButtonEnabled(True)
     window.top_search_input.setFixedWidth(160)
     window.top_search_input.setStyleSheet("""
         QLineEdit {
@@ -99,6 +100,8 @@ def setup_deck_header(window) -> QFrame:
         }
     """)
     window.top_search_input.textChanged.connect(window._filter_tracks_text)
+    if hasattr(window, "_search_channel_history"):
+        window.top_search_input.returnPressed.connect(window._search_channel_history)
 
     user_widget = QWidget()
     u_layout = QHBoxLayout(user_widget)
@@ -107,7 +110,8 @@ def setup_deck_header(window) -> QFrame:
     u_avatar = QLabel()
     u_avatar.setPixmap(create_user_avatar_pixmap())
     u_avatar.setFixedSize(24, 24)
-    u_name = QLabel("DJ KAIros ⌵")
+    u_name = QLabel("DJ KAIros")
+    u_name.setToolTip("Профиль DJ KAIros")
     u_name.setStyleSheet("color: #CBD5E1; font-size: 11px; font-weight: 700;")
     u_layout.addWidget(u_avatar)
     u_layout.addWidget(u_name)

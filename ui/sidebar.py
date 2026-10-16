@@ -3,6 +3,7 @@ Channels Sidebar and Telegram API configuration drawer for Beatstorm.
 """
 
 from PyQt6.QtCore import Qt
+from config import DEFAULT_CONFIG
 from PyQt6.QtWidgets import (
     QFrame,
     QLabel,
@@ -44,9 +45,17 @@ def setup_api_drawer(window) -> QGroupBox:
     window.bitrate_combo = QComboBox()
     window.bitrate_combo.addItems(["320k", "256k", "192k", "128k"])
     window.bitrate_combo.setCurrentText("192k")
-    window.bitrate_combo.setToolTip("Битрейт аудио при конвертации в MP3")
+    # Подсказка обязана прямо говорить про пропуск конвертации: трек, уже
+    # лежащий в MP3, сохраняется как есть и с исходным битрейтом, поэтому
+    # на MP3-каналах выбор битрейта не меняет ничего. Без этой оговорки
+    # пользователь выбирает 256k и молча получает 320k.
+    window.bitrate_combo.setToolTip(
+        "Битрейт аудио при конвертации в MP3.\n"
+        "Треки, уже в MP3, сохраняются без конвертации — с исходным "
+        "битрейтом, без потери качества."
+    )
 
-    window.export_pattern_input = QLineEdit("{date}/{artist} - {title}.mp3")
+    window.export_pattern_input = QLineEdit(DEFAULT_CONFIG["export_pattern"])
     window.export_pattern_input.setToolTip("Шаблон имени и папок сохранения: {channel}, {artist}, {title}, {year}, {bpm}")
 
     window.auto_m3u8_check = QCheckBox("Генерировать .M3U8 плейлисты")
@@ -191,6 +200,9 @@ def setup_channels_sidebar(window) -> QFrame:
     window.mode_combo.addItem("Прямое скачивание", "direct")
     window.mode_combo.addItem("Запись звука", "record")
     window.mode_combo.addItem("Гибрид (прямое, затем запись)", "hybrid")
+    # Режим должен сохраняться сразу, как битрейт и число потоков: в сайдбаре
+    # нет кнопки сохранения, поэтому выбор режима молча терялся при закрытии.
+    window.mode_combo.currentIndexChanged.connect(window._on_setting_changed)
 
     date_grid = QGridLayout()
     date_grid.setContentsMargins(0, 0, 0, 0)
@@ -208,13 +220,23 @@ def setup_channels_sidebar(window) -> QFrame:
     date_grid.addWidget(window.date_to_label, 1, 0)
     date_grid.addWidget(window.date_to_input, 1, 1)
 
+    # Канал и даты тоже должны сохраняться сразу, как режим, битрейт и
+    # число потоков. Раньше у этих трёх полей не было ни одного сигнала:
+    # значения читались из config при старте, но никогда не писались
+    # обратно, поэтому введённый канал молча терялся при закрытии.
+    window.channel_input.editingFinished.connect(window._on_setting_changed)
+    window.date_from_input.editingFinished.connect(window._on_setting_changed)
+    window.date_to_input.editingFinished.connect(window._on_setting_changed)
+
     preset_row = QHBoxLayout()
     window.btn_preset_all = QPushButton("Все")
     window.btn_preset_all.setObjectName("chipButton")
     window.btn_preset_all.clicked.connect(window._preset_dates_all)
+    window.btn_preset_all.clicked.connect(window._on_setting_changed)
     window.btn_preset_30d = QPushButton("30 дн")
     window.btn_preset_30d.setObjectName("chipButton")
     window.btn_preset_30d.clicked.connect(window._preset_dates_30d)
+    window.btn_preset_30d.clicked.connect(window._on_setting_changed)
     preset_row.addWidget(window.btn_preset_all)
     preset_row.addWidget(window.btn_preset_30d)
 
@@ -230,6 +252,8 @@ def setup_channels_sidebar(window) -> QFrame:
     chan_form.addWidget(window.scan_button)
     window.channel_group.setLayout(chan_form)
     left_layout.addWidget(window.channel_group)
+    if hasattr(window, "toggle_api_btn"):
+        left_layout.addWidget(window.toggle_api_btn)
     left_layout.addStretch()
 
     return window.left_panel

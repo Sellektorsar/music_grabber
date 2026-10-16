@@ -142,6 +142,58 @@ class TestAudioPlayerBar:
         bar.play_audio_file("nonexistent.mp3")
         assert any("Файл не найден" in msg for msg in logs)
 
+    def test_player_seek_and_volume(self, qtbot):
+        from unittest.mock import MagicMock
+        from PyQt6.QtMultimedia import QMediaPlayer
+
+        bar = AudioPlayerBar()
+        qtbot.addWidget(bar)
+
+        # 1. Without player
+        bar._player = None
+        bar.seek_relative(1000)
+        bar._on_seek_slider_moved(500)
+
+        # 2. With mock player
+        mock_p = MagicMock()
+        mock_p.position.return_value = 10000
+        mock_p.duration.return_value = 30000
+        bar._player = mock_p
+
+        bar.seek_relative(5000)
+        mock_p.setPosition.assert_called_with(15000)
+
+        bar.seek_relative(-20000)
+        mock_p.setPosition.assert_called_with(0)
+
+        bar.seek_relative(50000)
+        mock_p.setPosition.assert_called_with(30000)
+
+        bar._on_seek_slider_moved(500)
+        mock_p.setPosition.assert_called_with(15000)
+
+        # 3. Volume
+        mock_out = MagicMock()
+        bar._audio_output = mock_out
+        bar._on_volume_changed(50)
+        mock_out.setVolume.assert_called_with(0.5)
+
+        # 4. State, seek events, position & duration
+        bar._on_media_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+        assert bar.btn_play_pause.text() == "⏸"
+        bar._on_media_state_changed(QMediaPlayer.PlaybackState.PausedState)
+        assert bar.btn_play_pause.text() == "▶"
+
+        bar._on_seek_pressed()
+        assert bar._is_seeking is True
+        bar._on_seek_released()
+        assert bar._is_seeking is False
+
+        bar._on_media_position_changed(15000)
+        assert "00:15 / 00:30" in bar.player_time_label.text()
+        bar._on_media_duration_changed(30000)
+        assert "00:10 / 00:30" in bar.player_time_label.text()
+
 
 class TestViews:
     def test_views_creation(self, qtbot):
@@ -709,7 +761,61 @@ class TestStreamingPreviewUI:
         mock_thread_start.assert_called_once()
 
 
+class TestLibraryColumnResizeModes:
+    """DEFECT-019. Колонка STATUS должна оставаться видимой на узком окне.
 
+    TITLE, ARTIST, CHANNEL и WAVEFORM держали заданную ширину, и при
+    ширине окна в половину экрана сумма колонок превышала доступное
+    место: STATUS -- основная обратная связь -- уезжал за край и требовал
+    горизонтальной прокрутки.
+    """
 
+    def _tree(self, qtbot):
+        from ui.library import setup_library_panel
 
+        mock = QWidget()
+        for name in ("_toggle_filter_bar", "_expand_all_groups",
+                     "_collapse_all_groups", "_select_only_new_tracks",
+                     "_select_all_tracks", "_clear_selection",
+                     "_load_more_tracks", "_update_download_button_counter",
+                     "open_download_folder"):
+            setattr(mock, name, lambda *a, **kw: None)
+        mock.start_scan = lambda: None
+        mock._filter_tracks_text = lambda txt: None
+        mock._on_tree_item_double_clicked = lambda it, col: None
+        mock._on_tree_item_changed = lambda it, col: None
+        mock._on_tree_scroll = lambda val: None
+        mock._on_track_double_clicked = lambda it: None
 
+        panel = setup_library_panel(mock)
+        qtbot.addWidget(panel)
+        return mock.library_tree
+
+    @pytest.mark.parametrize("col", [1, 2, 5, 7])
+    def test_flexible_columns_stretch(self, qtbot, col):
+        from PyQt6.QtWidgets import QHeaderView
+
+        tree = self._tree(qtbot)
+        mode = tree.header().sectionResizeMode(col)
+        assert mode == QHeaderView.ResizeMode.Stretch, (
+            f"колонка {col} должна тянуться, иначе она выдавливает STATUS")
+
+    def test_status_column_present_and_fixed(self, qtbot):
+        from PyQt6.QtWidgets import QHeaderView
+
+        tree = self._tree(qtbot)
+        assert tree.columnCount() == 8
+        assert tree.header().sectionResizeMode(6) == QHeaderView.ResizeMode.Fixed
+        assert tree.columnWidth(6) > 0
+
+    def test_fixed_columns_stay_compact(self, qtbot):
+        """Фиксированные колонки не должны съедать место у растягиваемых."""
+        tree = self._tree(qtbot)
+        assert tree.columnWidth(0) <= 50
+        assert tree.columnWidth(4) <= 55
+
+    def test_sum_of_fixed_columns_leaves_room(self, qtbot):
+        """На половине экрана дерево получает около 630 px."""
+        tree = self._tree(qtbot)
+        fixed = sum(tree.columnWidth(i) for i in (0, 3, 4, 6))
+        assert fixed < 300, "фиксированные колонки не должны превышать 300 px"

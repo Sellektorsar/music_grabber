@@ -75,11 +75,14 @@ gui.py ←── downloader.py, config.py, PyQt6      │
 
 ## Компоненты
 
-### 1. `config.py` — Конфигурация (32 строки)
+### 1. `config.py` — Конфигурация
 
-- **load_config()**: читает `telegram_audio/config.json`, сливает с `DEFAULT_CONFIG`
+- **get_base_dir()**: определяет единый абсолютный корень проекта/приложения. Корректно разрешает пути при запуске из исходников и из `dist/` (в exe).
+- **BASE_PATH**: единый абсолютный путь к рабочей папке приложения (`<get_base_dir()>/telegram_audio`). Используется ядром, UI и экспортом плейлистов, исключая разрыв путей.
+- **get_session_path()**: возвращает актуальный абсолютный путь к файлу сессии MTProto.
+- **load_config()**: читает `config.json`, сливает с `DEFAULT_CONFIG`
 - **save_config(**kwargs)**: сохраняет настройки в JSON
-- **DEFAULT_CONFIG**: 12 ключей (api_id, api_hash, channel, mode, date_from, date_to, base_folder, max_concurrent_downloads, max_download_retries, download_delay, mp3_bitrate, sample_rate)
+- **DEFAULT_CONFIG**: параметры по умолчанию (api_id, api_hash, channel, mode, date_from, date_to, base_folder, max_concurrent_downloads, max_download_retries, download_delay, mp3_bitrate, sample_rate, embed_id3_tags, export_pattern и др.)
 - Контейнерный файл без состояния и классов
 
 ### 2. `recorder.py` — Ядро (God Object)

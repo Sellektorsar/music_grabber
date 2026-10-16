@@ -2,6 +2,9 @@
 *.session
 *.session.session
 *.session-journal
+*.session-wal
+*.session-shm
+*.session-*
 
 # Секреты и пользовательские конфиги
 .env
@@ -54,9 +57,11 @@ crash.log
 # Покрытие кода
 htmlcov/
 .coverage
+coverage.json
 
 # Pytest
 .pytest_cache/
+.pytest_tmp/
 
 # Временные скрипты и прототипы разработки
 _test_*.py

@@ -152,10 +152,12 @@ class AudioPlayerBar(QWidget):
     def play_audio_file(self, filepath: str, title: str = ""):
         """Воспроизводит аудиофайл через встроенный QMediaPlayer."""
         if not self._player:
-            self.log_callback("Аудиоплеер недоступен в данной системе.")
+            if callable(self.log_callback):
+                self.log_callback("Аудиоплеер недоступен в данной системе.")
             return
-        if not os.path.exists(filepath):
-            self.log_callback(f"Файл не найден на диске: {filepath}")
+        if not filepath or not isinstance(filepath, str) or not os.path.isfile(filepath):
+            if filepath and callable(self.log_callback):
+                self.log_callback(f"Файл не найден на диске: {filepath}")
             return
         self._current_audio_path = filepath
         self.setVisible(True)
@@ -164,6 +166,11 @@ class AudioPlayerBar(QWidget):
         self.player_title_label.setToolTip(display_title)
         self._player.setSource(QUrl.fromLocalFile(os.path.abspath(filepath)))
         self._player.play()
+
+    def load_track(self, filepath: str, title: str = "", artist: str = ""):
+        """Загружает и запускает трек в аудиоплеере (алиас для обратной совместимости)."""
+        display = f"{artist} - {title}" if artist and title else (title or artist)
+        return self.play_audio_file(filepath, display)
 
     def toggle_playback(self):
         if not self._player:
@@ -249,5 +256,9 @@ class AudioPlayerBar(QWidget):
     def _on_player_error(self, error, error_string=""):
         err_msg = f"Ошибка воспроизведения ({error}): {error_string}" if error_string else f"Ошибка воспроизведения ({error})"
         logger.warning(err_msg)
-        self.log_callback(f"⚠️ {err_msg}")
+        if callable(self.log_callback):
+            try:
+                self.log_callback(f"⚠️ {err_msg}")
+            except Exception as e:
+                logger.debug(f"Ошибка в log_callback: {e}")
         self.btn_play_pause.setText("▶")

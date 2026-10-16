@@ -35,7 +35,13 @@ class InputCodeDialog(QDialog):
 
     def __init__(self, prompt, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Ввод данных")
+        # Заголовок окна берётся из самого запроса. Раньше он был всегда
+        # «Ввод данных», и в списке окон и на панели задач невозможно было
+        # понять, просят телефон, код из Telegram или пароль 2FA.
+        head = (prompt or "").strip().rstrip(":")
+        if len(head) > 60:
+            head = head[:57] + "..."
+        self.setWindowTitle(head or "Ввод данных")
         self.setStyleSheet(DARK_STYLESHEET)
         self.setModal(True)
         self.resize(400, 130)
@@ -44,7 +50,9 @@ class InputCodeDialog(QDialog):
         self.label.setStyleSheet("font-weight: 700; font-size: 13px; color: #00E5FF;")
         self.input = QLineEdit()
         self.input.setEchoMode(QLineEdit.EchoMode.Normal)
-        self.input.setPlaceholderText("Введите значение...")
+        # Подсказка «Введите значение...» ничего не добавляла к тексту
+        # метки над полем и только занимала место.
+        self.input.setPlaceholderText("")
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

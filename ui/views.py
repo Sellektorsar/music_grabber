@@ -39,6 +39,7 @@ def create_home_view(window) -> QWidget:
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setStyleSheet("background: transparent; border: none;")
+    window.home_scroll = scroll
 
     container = QWidget()
     layout = QVBoxLayout(container)
@@ -186,17 +187,20 @@ def create_home_view(window) -> QWidget:
     btn_proxy_now.setObjectName("chipButton")
     btn_proxy_now.setMinimumHeight(32)
     btn_proxy_now.clicked.connect(lambda: window.open_proxy_settings() if hasattr(window, "open_proxy_settings") else None)
+    window.bento_btn_proxy = btn_proxy_now
 
     btn_open_music = QPushButton("📂 Музыка")
     btn_open_music.setObjectName("chipButton")
     btn_open_music.setMinimumHeight(32)
     btn_open_music.clicked.connect(lambda: window.open_download_folder() if hasattr(window, "open_download_folder") else None)
+    window.bento_btn_music = btn_open_music
 
     btn_go_lib = QPushButton("📚 Classic View")
     btn_go_lib.setObjectName("chipButton")
     btn_go_lib.setMinimumHeight(32)
     btn_go_lib.setToolTip("Переключиться в классический 3-колоночный режим")
     btn_go_lib.clicked.connect(lambda: window.switch_tab("library") if hasattr(window, "switch_tab") else None)
+    window.bento_btn_classic = btn_go_lib
 
     actions_grid.addWidget(window.bento_channel_input)
     actions_grid.addWidget(btn_scan_now)
@@ -477,7 +481,8 @@ def create_home_view(window) -> QWidget:
     search_row.setSpacing(8)
 
     window.home_search_input = QLineEdit()
-    window.home_search_input.setPlaceholderText("🔍 Поиск трека, артиста, тональности...")
+    window.home_search_input.setPlaceholderText("🔍 Поиск трека, артиста (Enter — искать в канале)...")
+    window.home_search_input.setClearButtonEnabled(True)
     window.home_search_input.setStyleSheet("""
         QLineEdit {
             background-color: #131A29;
@@ -491,11 +496,21 @@ def create_home_view(window) -> QWidget:
             border-color: #00D2BE;
         }
     """)
+    if hasattr(window, "_search_channel_history"):
+        window.home_search_input.returnPressed.connect(window._search_channel_history)
+
+    window.home_btn_search_channel = QPushButton("🔍 В канале")
+    window.home_btn_search_channel.setObjectName("secondaryButton")
+    window.home_btn_search_channel.setToolTip("Глобальный поиск по всей истории Telegram-канала")
+    window.home_btn_search_channel.setFixedHeight(28)
+    if hasattr(window, "_search_channel_history"):
+        window.home_btn_search_channel.clicked.connect(window._search_channel_history)
 
     window.home_btn_play_selected = QPushButton("▶ Play / Preview")
     window.home_btn_play_selected.setObjectName("primaryButton")
     window.home_btn_play_selected.setFixedHeight(28)
     search_row.addWidget(window.home_search_input, 1)
+    search_row.addWidget(window.home_btn_search_channel)
     search_row.addWidget(window.home_btn_play_selected)
     c4_layout.addLayout(search_row)
 
@@ -518,6 +533,8 @@ def create_home_view(window) -> QWidget:
         window.home_recent_table.itemDoubleClicked.connect(window._on_recent_table_double_clicked)
     if hasattr(window, "_on_recent_table_item_clicked"):
         window.home_recent_table.itemClicked.connect(window._on_recent_table_item_clicked)
+    if hasattr(window, "_on_recent_table_item_changed"):
+        window.home_recent_table.itemChanged.connect(window._on_recent_table_item_changed)
     c4_layout.addWidget(window.home_recent_table, 1)
 
     row3_layout.addWidget(card4, 3)
@@ -653,11 +670,13 @@ def create_home_view(window) -> QWidget:
         cnt = database.get_download_count()
         window.home_tracks_val.setText(f"{cnt} треков")
 
+        window.home_recent_table.blockSignals(True)
         records = database.get_downloads(limit=15)
         window.home_recent_table.setRowCount(len(records))
         for row_idx, r in enumerate(records):
             t_item = QTableWidgetItem(r.get("title") or "—")
-            t_item.setData(Qt.ItemDataRole.UserRole, r.get("file_path"))
+            t_item.setData(Qt.ItemDataRole.UserRole, r)
+            t_item.setCheckState(Qt.CheckState.Unchecked)
             a_item = QTableWidgetItem(r.get("performer") or r.get("artist") or "—")
             c_item = QTableWidgetItem(r.get("channel_id") or "—")
             f_item = QTableWidgetItem(r.get("filename") or "—")
@@ -670,6 +689,7 @@ def create_home_view(window) -> QWidget:
 
         if len(records) > 0:
             window.home_recent_table.selectRow(0)
+        window.home_recent_table.blockSignals(False)
 
         all_recs = database.get_downloads(limit=100)
         dups = sum(1 for r in all_recs if r.get("status") == "duplicate" or r.get("is_duplicate"))
@@ -688,7 +708,11 @@ def create_home_view(window) -> QWidget:
         logger.debug(f"Начальная загрузка метрик Bento: {e}")
 
     try:
-        total, used, free = shutil.disk_usage("telegram_audio")
+        # Путь берётся от BASE_PATH: относительный "telegram_audio" при
+        # запуске из ярлыка не существует, и метрики диска молча остались
+        # бы незаполненными.
+        from config import BASE_PATH
+        total, used, free = shutil.disk_usage(BASE_PATH)
         free_gb = free / (1024 ** 3)
         window.home_disk_val.setText(f"{free_gb:.1f} GB свободно")
         pct = int((used / total) * 100) if total > 0 else 0
@@ -753,6 +777,7 @@ def create_channels_view(window) -> QWidget:
     btn_add.setObjectName("primaryButton")
     btn_add.setFixedHeight(32)
     btn_add.clicked.connect(window._add_channel_from_manager)
+    window.chan_btn_add = btn_add
 
     af_layout.addWidget(add_lbl)
     af_layout.addWidget(window.chan_view_input, 1)

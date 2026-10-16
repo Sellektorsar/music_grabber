@@ -192,3 +192,44 @@ class TestConnectionErrorHandling:
         assert any("Ошибка подключения к Telegram через прокси" in log for log in logs)
 
 
+class TestDownloadThreadSearchQuery:
+    def test_download_thread_accepts_search_query(self):
+        dt = DownloadThread(
+            12345, "hash", "@ch", "direct", None, None, scan_only=True, search_query="My Track"
+        )
+        assert dt.search_query == "My Track"
+
+    @pytest.mark.asyncio
+    async def test_download_thread_passes_search_query_to_scan(self, monkeypatch):
+        dt = DownloadThread(
+            12345, "hash", "@ch", "direct", None, None, scan_only=True, search_query="Queen"
+        )
+        fake_client = AsyncMock()
+        fake_client.connect = AsyncMock()
+        fake_client.is_user_authorized = AsyncMock(return_value=True)
+        fake_client.disconnect = AsyncMock()
+        monkeypatch.setattr("downloader.TelegramClient", lambda *a, **kw: fake_client)
+
+        scan_calls = []
+
+        class MockRecorder:
+            def __init__(self, *args, **kwargs):
+                self.channel_username = "@ch"
+
+            async def scan(self, limit=None, offset_id=0, search_query=None):
+                scan_calls.append({"limit": limit, "offset_id": offset_id, "search_query": search_query})
+                return [{"id": 1, "title": "Bohemian Rhapsody"}]
+
+        monkeypatch.setattr("downloader.TelegramAudioRecorder", MockRecorder)
+
+        emitted_tracks = []
+        dt.scan_signal.connect(emitted_tracks.extend)
+
+        await dt.async_run()
+
+        assert len(scan_calls) == 1
+        assert scan_calls[0]["search_query"] == "Queen"
+        assert len(emitted_tracks) == 1
+        assert emitted_tracks[0]["title"] == "Bohemian Rhapsody"
+
+

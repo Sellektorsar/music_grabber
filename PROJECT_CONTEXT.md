@@ -56,65 +56,64 @@ TelegramAudioDownloader — десктоп-приложение на Python дл
 
 # Архитектурная схема
 
-main.py
+main.py (Single-instance IPC, crash-handler, logging setup, QApplication)
 
 ↓
 
-gui.py
+gui.py + ui/ (компоненты: navbar, sidebar, views, library, player, bento_widgets) + ui/controllers/ (контроллеры: download_controller, tree_controller, channels_controller)
 
 ↓
 
-downloader.py (QThread)
+downloader.py (QThread: TelegramClient, auth, background lifecycle)
 
 ↓
 
-recorder.py (TelegramAudioRecorder)
+recorder.py (TelegramAudioRecorder: сканирование, фильтрация, скачивание, ID3-тегирование, дедупликация)
 
 ↓
 
-Telethon / Telegram API
+Telethon / MTProto / Telegram API
 
 ---
 
-# Ответственность файлов
+# Ответственность файлов и пакетов
 
 ## main.py
 
 Точка входа.
 
-Создание QApplication.
+Single-instance IPC сокет (предотвращение дублирования процессов).
 
-Настройка логирования.
+Глобальный Crash-Handler (`sys.excepthook` -> `crash.log`).
 
-Запуск GUI.
+Создание QApplication и запуск GUI.
 
 ---
 
-## gui.py
+## gui.py и пакет ui/
 
-Пользовательский интерфейс.
+Главное окно `MainWindow` и модульный интерфейс BEATSTORM:
 
-Получение параметров пользователя.
-
-Отображение логов.
-
-Работа с настройками.
-
-Управление DownloadThread.
+- `gui.py` — координация UI, связывание контроллеров, обработка DJ Hotkeys, логирование;
+- `ui/controllers/` — бизнес-логика интерфейса:
+  - `download_controller.py` — управление сканированием, скачиванием, очередью и потоками;
+  - `tree_controller.py` — дерево папок, таблица треков, экспорт M3U8;
+  - `channels_controller.py` — управление списком каналов, статистика диска, настройки;
+- `ui/` — визуальные компоненты: `navbar.py`, `sidebar.py`, `views.py` (Bento Grid Studio), `library.py`, `player.py`, `bento_widgets.py`, `dialogs.py`, `theme.py`, `tray.py`.
 
 ---
 
 ## downloader.py
 
-Оркестратор приложения.
+Оркестратор взаимодействия с Telegram.
 
-Запуск отдельного QThread.
+Запуск отдельного QThread (`DownloadThread`).
 
-Авторизация Telegram.
+Инициализация и авторизация Telethon клиента.
 
-Создание Recorder.
+Управление диалогами авторизации (QR / код / 2FA) через сигналы.
 
-Передача сигналов GUI.
+Создание `TelegramAudioRecorder` и мост сигналов в UI.
 
 ---
 

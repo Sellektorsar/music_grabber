@@ -1,6 +1,7 @@
 import asyncio
 import os
 import queue
+import sqlite3
 import sys
 import traceback
 import urllib.parse
@@ -133,6 +134,8 @@ class DownloadThread(QThread):
         limit_per_channel=None,
         channel_offsets=None,
         preview_track_id=None,
+        search_query=None,
+        selected_channel_map=None,
     ):
         super().__init__()
         self.api_id = api_id
@@ -150,6 +153,8 @@ class DownloadThread(QThread):
         self.limit_per_channel = limit_per_channel
         self.channel_offsets = channel_offsets or {}
         self.preview_track_id = preview_track_id
+        self.search_query = search_query
+        self.selected_channel_map = selected_channel_map or {}
         self._cancel_requested = False
 
         self._input_queue = queue.Queue()
@@ -161,6 +166,9 @@ class DownloadThread(QThread):
     def run(self):
         try:
             asyncio.run(self.async_run())
+        except Exception as e:
+            self.log_signal.emit(f"Ошибка запуска: {e}")
+            self.log_signal.emit(traceback.format_exc())
         finally:
             # Сигнал о завершении эмитим строго один раз, независимо от того,
             # как завершился asyncio (нормально, исключением или отменой).
@@ -171,6 +179,23 @@ class DownloadThread(QThread):
         try:
             try:
                 await self.client.connect()
+            except sqlite3.OperationalError as db_err:
+                if "locked" in str(db_err).lower():
+                    self.log_signal.emit(
+                        "⚠️ Сессия Telegram заблокирована другим процессом. Повторная попытка через 2 секунды..."
+                    )
+                    await asyncio.sleep(2)
+                    try:
+                        await self.client.connect()
+                    except Exception as retry_err:
+                        self.log_signal.emit(
+                            f"⚠️ Не удалось подключиться к Telegram: сессия заблокирована ({retry_err}). "
+                            "Убедитесь, что приложение не запущено дважды (проверьте Диспетчер задач)."
+                        )
+                        return
+                else:
+                    self.log_signal.emit(f"⚠️ Ошибка базы данных сессии: {db_err}")
+                    return
             except (ConnectionError, TimeoutError, OSError) as conn_err:
                 proxy_enabled = bool(
                     self.proxy_config.get("enabled", False)
@@ -333,7 +358,9 @@ class DownloadThread(QThread):
                             else 0
                         )
                         tracks = await rec.scan(
-                            limit=self.limit_per_channel, offset_id=offset_id
+                            limit=self.limit_per_channel,
+                            offset_id=offset_id,
+                            search_query=self.search_query,
                         )
                         last_id = (
                             getattr(rec, "last_scanned_id", offset_id)
@@ -360,26 +387,47 @@ class DownloadThread(QThread):
                 self.log_signal.emit(f"Сканирование завершено: {len(all_tracks)} треков")
                 return
 
-            channels_list = self.channels if self.channels else [self.channel]
-            for ch in channels_list:
-                if self._cancel_requested:
-                    break
-                ch_clean = str(ch).strip()
-                if not ch_clean:
-                    continue
-                self.recorder = TelegramAudioRecorder(
-                    self.client,
-                    ch_clean,
-                    self.mode,
-                    date_from_dt,
-                    date_to_dt,
-                    self.log_signal.emit,
-                    self.progress_signal.emit,
-                    max_concurrent_downloads=self.max_concurrent_downloads,
-                    mp3_bitrate=self.mp3_bitrate,
-                )
-                self.recorder.selected_ids = self.selected_ids
-                await self.recorder.start()
+            if self.selected_channel_map:
+                for ch, ch_ids in self.selected_channel_map.items():
+                    if self._cancel_requested:
+                        break
+                    ch_clean = str(ch).strip()
+                    if not ch_clean or not ch_ids:
+                        continue
+                    self.recorder = TelegramAudioRecorder(
+                        self.client,
+                        ch_clean,
+                        self.mode,
+                        date_from_dt,
+                        date_to_dt,
+                        self.log_signal.emit,
+                        self.progress_signal.emit,
+                        max_concurrent_downloads=self.max_concurrent_downloads,
+                        mp3_bitrate=self.mp3_bitrate,
+                    )
+                    self.recorder.selected_ids = set(ch_ids)
+                    await self.recorder.start()
+            else:
+                channels_list = self.channels if self.channels else [self.channel]
+                for ch in channels_list:
+                    if self._cancel_requested:
+                        break
+                    ch_clean = str(ch).strip()
+                    if not ch_clean:
+                        continue
+                    self.recorder = TelegramAudioRecorder(
+                        self.client,
+                        ch_clean,
+                        self.mode,
+                        date_from_dt,
+                        date_to_dt,
+                        self.log_signal.emit,
+                        self.progress_signal.emit,
+                        max_concurrent_downloads=self.max_concurrent_downloads,
+                        mp3_bitrate=self.mp3_bitrate,
+                    )
+                    self.recorder.selected_ids = self.selected_ids
+                    await self.recorder.start()
 
             if self._cancel_requested:
                 self.log_signal.emit("Загрузка прервана пользователем.")
@@ -390,12 +438,34 @@ class DownloadThread(QThread):
             self.log_signal.emit(traceback.format_exc())
         finally:
             try:
-                if hasattr(self, "client") and self.client.is_connected():
-                    await self.client.disconnect()
+                if hasattr(self, "client") and self.client:
+                    if self.client.is_connected():
+                        await self.client.disconnect()
+                    session = getattr(self.client, "session", None)
+                    conn = getattr(session, "_conn", None)
+                    if conn is not None and hasattr(conn, "close"):
+                        try:
+                            res = conn.close()
+                            if asyncio.iscoroutine(res):
+                                await res
+                        except Exception:
+                            pass
+                        session._conn = None
             except Exception as e:
                 logger.warning(f"Ошибка при закрытии соединения: {e}")
 
     def _create_client(self):
+        from config import get_session_path
+
+        session_name = get_session_path()
+        session_file = session_name + ".session" if not session_name.endswith(".session") else session_name
+        if os.path.exists(session_file):
+            try:
+                with sqlite3.connect(session_file, timeout=5.0) as _sconn:
+                    _sconn.execute("PRAGMA journal_mode=WAL;")
+                    _sconn.execute("PRAGMA busy_timeout=5000;")
+            except Exception:
+                pass
         proxy_enabled = bool(
             self.proxy_config.get("enabled", False)
             or self.proxy_config.get("proxy_enabled", False)
@@ -443,7 +513,7 @@ class DownloadThread(QThread):
                         proxy = (socks.SOCKS5, proxy_host, int(proxy_port))
                     self.log_signal.emit(f"Подключение через SOCKS5://{proxy_host}:{proxy_port}...")
                     return TelegramClient(
-                        "session",
+                        session_name,
                         self.api_id,
                         self.api_hash,
                         proxy=proxy,
@@ -466,7 +536,7 @@ class DownloadThread(QThread):
                         proxy = (socks.HTTP, proxy_host, int(proxy_port))
                     self.log_signal.emit(f"Подключение через HTTP://{proxy_host}:{proxy_port}...")
                     return TelegramClient(
-                        "session",
+                        session_name,
                         self.api_id,
                         self.api_hash,
                         proxy=proxy,
@@ -481,7 +551,7 @@ class DownloadThread(QThread):
                     secret = proxy_password or ""
                     self.log_signal.emit(f"Подключение через MTProto://{proxy_host}:{proxy_port}...")
                     return TelegramClient(
-                        "session",
+                        session_name,
                         self.api_id,
                         self.api_hash,
                         connection=ConnectionTcpMTProxyRandomizedIntermediate,
@@ -513,7 +583,7 @@ class DownloadThread(QThread):
                             f"Используется активный системный туннель ({st_type.upper()}://{st_host}:{st_port})..."
                         )
                         return TelegramClient(
-                            "session",
+                            session_name,
                             self.api_id,
                             self.api_hash,
                             proxy=(sock_type, st_host, int(st_port)),
@@ -524,7 +594,7 @@ class DownloadThread(QThread):
                         logger.debug(f"Не удалось применить системный туннель: {te}")
 
         return TelegramClient(
-            "session",
+            session_name,
             self.api_id,
             self.api_hash,
             connection_retries=3,

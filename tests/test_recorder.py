@@ -846,6 +846,11 @@ class TestExportPatternsAndPlaylists:
 
         async def _mock_download(m, file_path, sem):
             recorder._downloaded += 1
+            # Плейлист строится только по реально существующим файлам,
+            # поэтому тест обязан создать файл на диске.
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as fh:
+                fh.write(b"ID3" + b"\x00" * 64)
             recorder._downloaded_playlist_entries.append({
                 "filepath": file_path,
                 "artist": "DJ Hero",
@@ -1020,7 +1025,154 @@ class TestStreamingAudioPreview:
         assert b"ID3_AUDIO_CHUNK_1_" in data
         assert len(data) >= 30000
 
+    @pytest.mark.asyncio
+    async def test_scan_with_search_query_music_filter(self, recorder):
+        from telethon.tl.types import InputMessagesFilterMusic
 
+        fake_msg = MagicMock()
+        fake_msg.id = 101
+        fake_msg.audio = MagicMock(performer="Search Artist", title="Search Track")
+        fake_msg.document = None
+        fake_msg.date = datetime.now(timezone.utc)
 
+        iter_calls = []
 
+        async def _mock_iter(entity, **kwargs):
+            iter_calls.append(kwargs)
+            yield fake_msg
+
+        recorder.client.get_entity = AsyncMock(return_value=MagicMock())
+        recorder.client.iter_messages = _mock_iter
+
+        tracks = await recorder.scan(limit=50, search_query="Search Track")
+
+        assert len(tracks) == 1
+        assert tracks[0]["id"] == 101
+        assert tracks[0]["title"] == "Search Track"
+        assert len(iter_calls) == 1
+        assert iter_calls[0].get("search") == "Search Track"
+        assert iter_calls[0].get("filter") == InputMessagesFilterMusic
+
+    @pytest.mark.asyncio
+    async def test_scan_with_search_query_fallback_when_empty(self, recorder):
+        from telethon.tl.types import InputMessagesFilterMusic
+
+        doc_msg = MagicMock()
+        doc_msg.id = 202
+        doc_msg.audio = None
+        doc_msg.document = MagicMock(mime_type="audio/mpeg", size=1024)
+        doc_msg.message = "Doc Audio Track"
+        doc_msg.date = datetime.now(timezone.utc)
+
+        iter_calls = []
+
+        async def _mock_iter(entity, **kwargs):
+            iter_calls.append(kwargs)
+            if kwargs.get("filter") == InputMessagesFilterMusic:
+                # First pass: returns empty
+                return
+            # Fallback pass: returns doc_msg
+            yield doc_msg
+
+        recorder.client.get_entity = AsyncMock(return_value=MagicMock())
+        recorder.client.iter_messages = _mock_iter
+
+        tracks = await recorder.scan(limit=50, search_query="Doc Audio")
+
+        assert len(tracks) == 1
+        assert tracks[0]["id"] == 202
+        assert len(iter_calls) == 2
+        assert iter_calls[0].get("filter") == InputMessagesFilterMusic
+        assert iter_calls[1].get("filter") is None
+        assert iter_calls[1].get("search") == "Doc Audio"
+
+    @pytest.mark.asyncio
+    async def test_scan_with_search_query_pagination(self, recorder):
+        fake_msg = MagicMock()
+        fake_msg.id = 303
+        fake_msg.audio = MagicMock(performer="Paged Artist", title="Paged Track")
+        fake_msg.document = None
+        fake_msg.date = datetime.now(timezone.utc)
+
+        iter_calls = []
+
+        async def _mock_iter(entity, **kwargs):
+            iter_calls.append(kwargs)
+            yield fake_msg
+
+        recorder.client.get_entity = AsyncMock(return_value=MagicMock())
+        recorder.client.iter_messages = _mock_iter
+
+        tracks = await recorder.scan(limit=25, offset_id=500, search_query="Paged")
+
+        assert len(tracks) == 1
+        assert len(iter_calls) == 1
+        assert iter_calls[0].get("offset_id") == 500
+        assert iter_calls[0].get("search") == "Paged"
+
+    @pytest.mark.asyncio
+    async def test_m3u8_playlist_name_sanitized_when_channel_is_url(self, recorder, tmp_path, monkeypatch):
+        import recorder as rec_module
+        monkeypatch.setattr(rec_module, "BASE_FOLDER", str(tmp_path))
+
+        recorder.channel_username = "https://t.me/x"
+        real_track = tmp_path / "track.mp3"
+        real_track.write_bytes(b"ID3" + b"\x00" * 64)
+        recorder._downloaded_playlist_entries = [
+            {"filepath": str(real_track), "artist": "Artist", "title": "Track", "duration": 180}
+        ]
+        fake_msg = MagicMock()
+        fake_msg.id = 1
+        fake_msg.date = datetime(2026, 10, 10, 12, 0, 0)
+        fake_msg.audio = MagicMock(performer="Artist", title="Track", duration=180)
+        fake_msg.document = None
+
+        async def _iter(*a, **kw):
+            yield fake_msg
+
+        recorder.client.iter_messages = _iter
+        recorder.client.get_entity = AsyncMock(return_value=MagicMock())
+
+        async def _mock_download(m, file_path, sem):
+            pass
+
+        recorder.download_with_limit = _mock_download
+
+        # Запуск не должен вызывать исключений (WinError 123)
+        await recorder.start()
+
+        m3u8_files = list(tmp_path.glob("*.m3u8"))
+        assert len(m3u8_files) == 1
+        playlist_path = str(m3u8_files[0])
+        assert ":" not in os.path.basename(playlist_path)
+
+    @pytest.mark.asyncio
+    async def test_start_with_selected_ids_uses_get_messages(self, recorder):
+        msg = MagicMock()
+        msg.id = 50
+        msg.audio = MagicMock(performer="Artist", title="Track", duration=180)
+        msg.document = None
+        msg.date = datetime.now(timezone.utc)
+
+        get_msgs_called = []
+
+        async def _mock_get_messages(entity, ids):
+            get_msgs_called.append(ids)
+            return [msg]
+
+        recorder.client.get_messages = _mock_get_messages
+        recorder.client.get_entity = AsyncMock(return_value=MagicMock())
+        recorder.selected_ids = {50}
+
+        downloaded_ids = []
+
+        async def _mock_download(m, file_path, sem):
+            downloaded_ids.append(m.id)
+
+        recorder.download_with_limit = _mock_download
+        await recorder.start()
+
+        assert len(get_msgs_called) == 1
+        assert 50 in get_msgs_called[0]
+        assert downloaded_ids == [50]
 

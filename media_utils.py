@@ -2,6 +2,7 @@
 
 import os
 import re
+from config import DEFAULT_CONFIG
 import logging
 from datetime import datetime, timezone
 from telethon.tl.types import DocumentAttributeAudio
@@ -243,7 +244,13 @@ def sanitize_path_segment(segment: str) -> str:
     res = str(segment).replace("..", "")
     for ch in invalid_chars:
         res = res.replace(ch, "_")
-    res = re.sub(r"_+", "_", res).strip("_. ")
+    # Управляющие символы Windows в имени файла недопустимы: перевод строки
+    # даёт «Invalid argument» при открытии, а нулевой байт — «embedded null
+    # byte». Такие треки нельзя было скачать вовсе, а ошибка уходила в лог
+    # как сетевая. Пробелы после замены схлопываются в один.
+    res = re.sub(r"[\x00-\x1f\x7f]+", " ", res)
+    res = re.sub(r"_+", "_", res)
+    res = re.sub(r"\s+", " ", res).strip("_. ")
     return res or "Unknown"
 
 
@@ -259,7 +266,7 @@ def format_export_path(
 ) -> str:
     """Формирует структурированный путь экспорта файла по настраиваемому паттерну."""
     if not pattern:
-        pattern = "{date}/{artist} - {title}.mp3"
+        pattern = DEFAULT_CONFIG["export_pattern"]
 
     if date_val is not None:
         if getattr(date_val, "tzinfo", None) is not None:

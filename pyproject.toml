@@ -2,4 +2,4 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-addopts = "-v --cov=. --cov-report=term-missing --cov-report=html"
+addopts = "-v --cov=. --cov-report=term-missing --cov-report=html --cov-report=json:coverage.json"
