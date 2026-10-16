@@ -10,10 +10,14 @@ hiddenimports += collect_submodules('telethon')
 hiddenimports += collect_submodules('pydub')
 hiddenimports += collect_submodules('mutagen')
 
-# numpy/scipy/sounddevice тоже требуют явного перечисления подмодулей
-hiddenimports += collect_submodules('scipy')
-hiddenimports += collect_submodules('sounddevice')
+# numpy требует явного перечисления подмодулей
 hiddenimports += collect_submodules('numpy')
+
+# sounddevice и scipy больше не собираются. Ими пользовался только
+# audio_capture (режим «Запись звука»), который удалён вместе с
+# режимами: модуль остался в репозитории, но приложение его не
+# импортирует, поэтому тянется в сборку незачем -- это была заметная
+# часть размера готового файла.
 
 # Дополнительные модули, которые PyInstaller может не обнаружить автоматически
 hiddenimports += [
@@ -46,7 +50,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # pydub умеет фильтры верхних/низких частот через scipy, но этот
+    # модуль никто не импортирует: collect_submodules('pydub') перечисляет
+    # все подмодули подряд и тянул scipy целиком. Ядро конвертации
+    # (from_file/export) от scipy не зависит.
+    excludes=['scipy', 'pydub.scipy_effects'],
     noarchive=False,
 )
 
